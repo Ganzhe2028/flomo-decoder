@@ -8,6 +8,41 @@
 - `b`：重要功能、处理流程升级、版本更新换代。
 - `c`：小功能、日常修正、文档或脚本微调。
 
+## 2026-08-17 - 0.6.0 增量收件与跨设备发布
+
+### 本次更新内容
+
+- **Flomo ZIP 直接收件**：新增 `import` 工作流，可直接安全解压 ZIP、归档、转换并发布；导入状态和 ZIP 哈希保存在 `raw/.import-manifest.json`。
+- **同日重叠导出去重**：不同批次中用户、创建时间、正文、图片数和批内 occurrence 相同的 memo 会合并；同批次真实重复保留。下次导出日期始终是最后成功 memo 的当天，不加一天。
+- **历史图片结果复用**：重叠批次保留最早 memo/image ID，`image.enriched.jsonl` 迁移前自动备份，多个结果时优先保留 success。
+- **一次性兼容迁移**：首次增量导入自动重建历史月份，使既有重叠批次与新去重规则一致；迁移完成后恢复为仅重建受影响月份。
+- **完整快照发布**：chunks 发布到 `snapshots/<release-id>/`，`manifest.json` 保存文件哈希、时间范围、去重，以及失败图片数与原因；只有全部校验通过后才更新 `latest.json`。
+- **GUI 自动队列**：新增 inbox/发布目录、Downloads 扫描、ZIP 完整性检查、自动处理、LM Studio 等待、建议导出日期和发布状态。
+- **GUI 安装包升级**：桌面端版本更新为 `0.2.0`，避免与不含增量收件的旧版 `0.1.0` 混淆。
+- **校验修正**：允许无正文但有图片的 memo；chunks 校验忽略 `.opencode` 等非 `YYYY-MM` 目录。
+- **Syncthing 用法**：README 增加 Windows/Mac inbox 和 context 双目录配置、Agent 完整性校验与安全说明。
+
+### 影响范围
+
+- Stage 1 解析与图片增强结果迁移。
+- 主工作流、CLI/sidecar、Tauri GUI 和跨设备 chunks 交付。
+- 旧的 first/daily/probe/retry 入口保持可用。
+
+## 2026-08-10 - 数据层更新（无代码变更）
+
+### 本次更新内容
+
+- **2026.6 及之后全部导出解析完成**：处理 `raw/2026/` 下 20260601、20260624、20260701、20260801 四个导出，全链路跑通（Stage 1 extract → Stage 2 LM Studio enrich → Stage 3 merge → Stage 4 chunks）。
+- **7 月导出被替换后全链路重跑**：`raw/2026/flomo@User-20260701` 原导出不完整（119 memos / 97 images），用户 2026-08-10 替换为完整版后重跑（265 memos / 230 images）。重跑前需先删除 `store/image.enriched.jsonl` 中旧的 07 月记录，避免 extract 重建后 image_id 漂移产生孤儿记录。
+- **Stage 2 完成度**：2026-06 共 339 张（299 success + 40 skipped 媒体）、2026-07 共 230 张（186 success + 44 skipped）、2026-08 共 152 张（115 success + 37 skipped），全部 0 failed；VLM 为 LM Studio `google/gemma-4-e4b`。
+- **下游产物**：`monthly/2026-06/07/08.enriched.jsonl` 与 `llm_chunks/2026-06/07/08/`（06 月 77 chunks、07 月 59、08 月 29）全部重建并通过对应 validator（0 errors）。
+- **运行环境经验**（详见 AGENTS.md NOTES）：WSL 下运行必须用 `.venv/Scripts/python.exe` + cmd 批处理注入 `FLOMO_VLM_*` 环境变量 + PowerShell `Start-Process` 后台启动；WSL `export` 环境变量不会传给 Windows 进程，`nohup` 后台进程会随 bash 退出被杀。
+
+### 验证结果
+
+- `validate_enriched_images.py`、`validate_monthly.py`、`validate_chunks.py` 对 06/07/08 月全部 0 errors。
+- 检查孤儿记录为 0（`image.enriched.jsonl` 中所有 image_id 均存在于 `image.raw.jsonl`）。
+
 ## 2026-06-24 - 0.5.0 级别更新
 
 ### 本次更新内容

@@ -221,6 +221,22 @@ def test_chunk_validator_passes_generated_output(tmp_path: Path) -> None:
     assert report.ok, report.format_detail()
 
 
+def test_chunk_validator_ignores_non_month_directories(tmp_path: Path) -> None:
+    monthly_root, chunks_root = _setup_chunk_monthly(tmp_path)
+    ChunkBuildRunner(
+        monthly_root=monthly_root,
+        chunks_root=chunks_root,
+        target_tokens=120,
+        overwrite=True,
+    ).run()
+    (chunks_root / ".opencode").mkdir()
+    (chunks_root / "notes").mkdir()
+
+    report = ChunkValidator(monthly_root=monthly_root, chunks_root=chunks_root).validate()
+
+    assert report.ok, report.format_detail()
+
+
 def test_chunk_validator_catches_duplicate_chunk_id_and_missing_memo(tmp_path: Path) -> None:
     monthly_root, chunks_root = _setup_chunk_monthly(tmp_path)
 

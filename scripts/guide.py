@@ -6,7 +6,6 @@ import argparse
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
@@ -55,6 +54,7 @@ def _prompt_action() -> str | None:
     print("2. Daily update: refresh LLM chunks after raw/ changes")
     print("3. Probe one image with LM Studio")
     print("4. Retry failed image records")
+    print("5. Import a Flomo ZIP and publish a sync snapshot")
     print("q. Quit")
     choice = input("Choose: ").strip().lower()
     actions = {
@@ -62,6 +62,7 @@ def _prompt_action() -> str | None:
         "2": "daily",
         "3": "probe",
         "4": "retry",
+        "5": "import",
         "q": None,
         "quit": None,
         "exit": None,
@@ -93,6 +94,19 @@ def _prompt_image() -> Path:
         print("Image path is required.", file=sys.stderr)
         raise SystemExit(2)
     return Path(image)
+
+
+def _prompt_zip() -> Path:
+    zip_path = input("Flomo ZIP path: ").strip()
+    if not zip_path:
+        print("Flomo ZIP path is required.", file=sys.stderr)
+        raise SystemExit(2)
+    return Path(zip_path)
+
+
+def _prompt_publish_root() -> Path:
+    publish_root = input("Published context folder (default flomo-context): ").strip()
+    return Path(publish_root or "flomo-context")
 
 
 def _build_chunks_from_raw(
@@ -156,7 +170,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Guided flomo-transcriber workflow")
     parser.add_argument(
         "--action",
-        choices=["first", "daily", "probe", "retry"],
+        choices=["first", "daily", "probe", "retry", "import"],
         default=None,
         help="Skip the menu and run one guide action",
     )
@@ -165,9 +179,11 @@ def main() -> None:
     parser.add_argument("--store-root", type=Path, default=Path("store"))
     parser.add_argument("--monthly-root", type=Path, default=Path("monthly"))
     parser.add_argument("--chunks-root", type=Path, default=Path("llm_chunks"))
+    parser.add_argument("--publish-root", type=Path, default=None)
     parser.add_argument("--month", default=None, help="Run one month, e.g. 2025-12")
     parser.add_argument("--provider", choices=["lmstudio", "mock"], default=None)
     parser.add_argument("--image", type=Path, default=None)
+    parser.add_argument("--zip", dest="zip_path", type=Path, default=None)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
@@ -193,19 +209,26 @@ def main() -> None:
 
     month = _prompt_month() if interactive and action in {"first", "daily", "retry"} else args_month
     provider = args.provider
-    if action in {"first", "daily", "retry"}:
+    if action in {"first", "daily", "retry", "import"}:
         provider = provider or (_prompt_provider() if interactive else "lmstudio")
 
     raw_root = _project_path(args.raw_root)
     store_root = _project_path(args.store_root)
     monthly_root = _project_path(args.monthly_root)
     chunks_root = _project_path(args.chunks_root)
+    if args.publish_root is not None:
+        publish_root = _project_path(args.publish_root)
+    elif interactive and action == "import":
+        publish_root = _project_path(_prompt_publish_root())
+    else:
+        publish_root = None
     paths = WorkflowPaths(
         project_root=PROJECT_ROOT,
         raw_root=raw_root,
         store_root=store_root,
         monthly_root=monthly_root,
         chunks_root=chunks_root,
+        publish_root=publish_root,
     )
 
     if action in {"first", "daily"}:
@@ -233,6 +256,25 @@ def main() -> None:
                 month=month,
                 rounds=args.rounds,
                 workers=args.workers,
+            ),
+        )
+        return
+
+    if action == "import":
+        zip_path = args.zip_path or (_prompt_zip() if interactive else None)
+        if zip_path is None:
+            print("--zip is required for import.", file=sys.stderr)
+            raise SystemExit(2)
+        if publish_root is None:
+            print("--publish-root is required for import.", file=sys.stderr)
+            raise SystemExit(2)
+        run_action(
+            "import",
+            paths,
+            WorkflowOptions(
+                provider=provider or "lmstudio",
+                workers=args.workers,
+                zip_path=zip_path,
             ),
         )
         return

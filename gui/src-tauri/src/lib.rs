@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
@@ -33,6 +34,17 @@ struct WorkflowState {
     active: Option<ActiveWorkflow>,
 }
 
+#[derive(Default)]
+struct InboxScanState {
+    observations: HashMap<String, FileObservation>,
+}
+
+#[derive(Clone, Copy)]
+struct FileObservation {
+    size: u64,
+    modified_millis: u128,
+}
+
 struct ActiveWorkflow {
     task_id: String,
     process: Option<ActiveProcess>,
@@ -42,7 +54,9 @@ struct ActiveWorkflow {
 enum ActiveProcess {
     Sidecar(CommandChild),
     #[cfg(debug_assertions)]
-    Local { pid: u32 },
+    Local {
+        pid: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +67,10 @@ struct AppSettings {
     store_root: String,
     monthly_root: String,
     chunks_root: String,
+    inbox_root: String,
+    publish_root: String,
+    scan_downloads: bool,
+    auto_import: bool,
     vlm_base_url: String,
     vlm_model: String,
     vlm_retry_model: String,
@@ -72,6 +90,14 @@ struct GuiPathSettings {
     monthly_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chunks_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbox_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan_downloads: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_import: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,9 +109,45 @@ struct WorkflowRequest {
     store_root: String,
     monthly_root: String,
     chunks_root: String,
+    publish_root: String,
     env_file: String,
     image: Option<String>,
+    zip: Option<String>,
     rounds: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ZipCandidate {
+    path: String,
+    name: String,
+    size: u64,
+    modified_millis: u128,
+    source: String,
+    stable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct ImportStatus {
+    suggested_export_date: Option<String>,
+    latest_memo_at: Option<String>,
+    last_release: Option<String>,
+    imports: Vec<ImportEntryStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ImportEntryStatus {
+    original_filename: String,
+    status: String,
+    error_message: Option<String>,
+    failed_images: u64,
+    image_failures: Vec<ImageFailureStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ImageFailureStatus {
+    image_id: String,
+    month: String,
+    error_message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +190,16 @@ fn read_settings(app: AppHandle) -> Result<AppSettings, String> {
             gui_settings.chunks_root,
             project_root.join("llm_chunks"),
         ),
+        inbox_root: setting_path_or_default(
+            gui_settings.inbox_root,
+            project_root.join("flomo-inbox"),
+        ),
+        publish_root: setting_path_or_default(
+            gui_settings.publish_root,
+            project_root.join("flomo-context"),
+        ),
+        scan_downloads: gui_settings.scan_downloads.unwrap_or(true),
+        auto_import: gui_settings.auto_import.unwrap_or(true),
         vlm_base_url: env
             .get("FLOMO_VLM_BASE_URL")
             .cloned()
@@ -157,7 +229,15 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     write_env_file(&env_file, &updates)?;
 
     let project_root = workspace_root(&app)?;
-    write_gui_path_settings(&gui_settings_path(&project_root), &settings)
+    write_gui_path_settings(&gui_settings_path(&project_root), &settings)?;
+    for path in [&settings.inbox_root, &settings.publish_root] {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            fs::create_dir_all(trimmed)
+                .map_err(|error| format!("无法创建同步目录 {trimmed}：{error}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -282,10 +362,7 @@ fn run_workflow(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn cancel_workflow(
-    state: State<'_, Mutex<WorkflowState>>,
-    task_id: String,
-) -> Result<(), String> {
+fn cancel_workflow(state: State<'_, Mutex<WorkflowState>>, task_id: String) -> Result<(), String> {
     let process = {
         let mut guarded = state
             .lock()
@@ -319,8 +396,7 @@ fn list_available_months(raw_root: String) -> Result<Vec<String>, String> {
     }
 
     let mut months: BTreeSet<String> = BTreeSet::new();
-    let year_dirs = fs::read_dir(&raw)
-        .map_err(|e| format!("无法读取 raw 目录：{e}"))?;
+    let year_dirs = fs::read_dir(&raw).map_err(|e| format!("无法读取 raw 目录：{e}"))?;
 
     for year_entry in year_dirs {
         let year_entry = year_entry.map_err(|e| format!("无法读取 raw 子目录：{e}"))?;
@@ -363,6 +439,284 @@ fn list_available_months(raw_root: String) -> Result<Vec<String>, String> {
     }
 
     Ok(months.into_iter().collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn scan_import_zips(
+    app: AppHandle,
+    state: State<'_, Mutex<InboxScanState>>,
+    inbox_root: String,
+    scan_downloads: bool,
+) -> Result<Vec<ZipCandidate>, String> {
+    let mut roots = vec![(PathBuf::from(inbox_root), "inbox")];
+    if scan_downloads {
+        if let Ok(downloads) = app.path().download_dir() {
+            roots.push((downloads, "downloads"));
+        }
+    }
+
+    let mut discovered = Vec::new();
+    for (root, source) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let entries =
+            fs::read_dir(&root).map_err(|error| format!("无法扫描 {}：{error}", root.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !looks_like_flomo_zip(&path) {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) if metadata.is_file() => metadata,
+                _ => continue,
+            };
+            let modified_millis = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
+            discovered.push((path, source.to_string(), metadata.len(), modified_millis));
+        }
+    }
+
+    discovered.sort_by(|left, right| right.3.cmp(&left.3).then_with(|| left.0.cmp(&right.0)));
+    let mut guarded = state
+        .lock()
+        .map_err(|_| "无法读取收件扫描状态。".to_string())?;
+    let mut current = HashMap::new();
+    let candidates = discovered
+        .into_iter()
+        .map(|(path, source, size, modified_millis)| {
+            let path_text = path.to_string_lossy().into_owned();
+            let unchanged = observation_is_unchanged(
+                guarded.observations.get(&path_text),
+                size,
+                modified_millis,
+            );
+            let stable = unchanged && zip_directory_is_readable(&path);
+            current.insert(
+                path_text.clone(),
+                FileObservation {
+                    size,
+                    modified_millis,
+                },
+            );
+            ZipCandidate {
+                name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: path_text,
+                size,
+                modified_millis,
+                source,
+                stable,
+            }
+        })
+        .collect();
+    guarded.observations = current;
+    Ok(candidates)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn read_import_status(raw_root: String, publish_root: String) -> Result<ImportStatus, String> {
+    let raw_manifest = PathBuf::from(raw_root).join(".import-manifest.json");
+    let latest_manifest = PathBuf::from(publish_root).join("latest.json");
+    let mut status = ImportStatus::default();
+
+    for path in [raw_manifest, latest_manifest] {
+        if !path.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|error| format!("无法解析 {}：{error}", path.display()))?;
+        if path.file_name().and_then(|name| name.to_str()) == Some(".import-manifest.json") {
+            status.imports = import_entries_from_json(&value);
+        }
+        if status.suggested_export_date.is_none() {
+            status.suggested_export_date = find_json_string(
+                &value,
+                &[
+                    "suggested_export_date",
+                    "next_export_start_date",
+                    "next_export_date",
+                ],
+            );
+        }
+        if status.latest_memo_at.is_none() {
+            status.latest_memo_at = find_json_string(
+                &value,
+                &[
+                    "max_successfully_published_created_at",
+                    "latest_memo_at",
+                    "max_created_at",
+                ],
+            );
+        }
+        if status.last_release.is_none() {
+            status.last_release = find_json_string(&value, &["release_id", "release", "snapshot"]);
+        }
+    }
+
+    if status.suggested_export_date.is_none() {
+        status.suggested_export_date = status
+            .latest_memo_at
+            .as_deref()
+            .filter(|value| value.len() >= 10)
+            .map(|value| value[..10].to_string());
+    }
+    Ok(status)
+}
+
+fn import_entries_from_json(value: &serde_json::Value) -> Vec<ImportEntryStatus> {
+    value
+        .get("imports")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(ImportEntryStatus {
+                original_filename: entry.get("original_filename")?.as_str()?.to_string(),
+                status: entry.get("status")?.as_str()?.to_string(),
+                error_message: entry
+                    .get("error_message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                failed_images: entry
+                    .get("failed_images")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                image_failures: entry
+                    .get("image_failures")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|failure| {
+                        Some(ImageFailureStatus {
+                            image_id: failure.get("image_id")?.as_str()?.to_string(),
+                            month: failure.get("month")?.as_str()?.to_string(),
+                            error_message: failure.get("error_message")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn looks_like_flomo_zip(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    if !lower.starts_with("flomo@") || !lower.ends_with(".zip") {
+        return false;
+    }
+    let stem = &lower[..lower.len() - 4];
+    let mut parts = stem.rsplit('-');
+    let last = parts.next().unwrap_or_default();
+    if last.len() == 8 && last.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    let is_hash_suffix =
+        (8..=64).contains(&last.len()) && last.bytes().all(|byte| byte.is_ascii_hexdigit());
+    is_hash_suffix
+        && parts
+            .next()
+            .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn observation_is_unchanged(
+    previous: Option<&FileObservation>,
+    size: u64,
+    modified_millis: u128,
+) -> bool {
+    previous.is_some_and(|value| value.size == size && value.modified_millis == modified_millis)
+}
+
+fn zip_directory_is_readable(path: &Path) -> bool {
+    const MAX_END_RECORD: u64 = 65_557;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let file_len = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return false,
+    };
+    if file_len < 22 {
+        return false;
+    }
+    let tail_len = file_len.min(MAX_END_RECORD) as usize;
+    if file.seek(SeekFrom::End(-(tail_len as i64))).is_err() {
+        return false;
+    }
+    let mut tail = vec![0_u8; tail_len];
+    if file.read_exact(&mut tail).is_err() {
+        return false;
+    }
+    let Some(position) = tail
+        .windows(4)
+        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+    else {
+        return false;
+    };
+    if position + 22 > tail.len() {
+        return false;
+    }
+    let comment_len = u16::from_le_bytes([tail[position + 20], tail[position + 21]]) as usize;
+    if position + 22 + comment_len != tail.len() {
+        return false;
+    }
+    let directory_size = u32::from_le_bytes([
+        tail[position + 12],
+        tail[position + 13],
+        tail[position + 14],
+        tail[position + 15],
+    ]) as u64;
+    let directory_offset = u32::from_le_bytes([
+        tail[position + 16],
+        tail[position + 17],
+        tail[position + 18],
+        tail[position + 19],
+    ]) as u64;
+    let bounds_are_valid = directory_offset
+        .checked_add(directory_size)
+        .is_some_and(|end| end <= file_len);
+    if !bounds_are_valid {
+        return false;
+    }
+    if directory_size == 0 {
+        return true;
+    }
+    if file.seek(SeekFrom::Start(directory_offset)).is_err() {
+        return false;
+    }
+    let mut signature = [0_u8; 4];
+    file.read_exact(&mut signature).is_ok() && signature == [0x50, 0x4b, 0x01, 0x02]
+}
+
+fn find_json_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(serde_json::Value::as_str) {
+                    return Some(value.to_string());
+                }
+            }
+            map.values().find_map(|value| find_json_string(value, keys))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .rev()
+            .find_map(|value| find_json_string(value, keys)),
+        _ => None,
+    }
 }
 
 fn extract_month_from_batch(name: &str) -> Option<String> {
@@ -418,12 +772,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(WorkflowState::default()))
+        .manage(Mutex::new(InboxScanState::default()))
         .invoke_handler(tauri::generate_handler![
             read_settings,
             save_settings,
             run_workflow,
             cancel_workflow,
             list_available_months,
+            scan_import_zips,
+            read_import_status,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -501,6 +858,10 @@ fn gui_path_settings_from_app_settings(settings: &AppSettings) -> GuiPathSetting
         store_root: optional_path(&settings.store_root),
         monthly_root: optional_path(&settings.monthly_root),
         chunks_root: optional_path(&settings.chunks_root),
+        inbox_root: optional_path(&settings.inbox_root),
+        publish_root: optional_path(&settings.publish_root),
+        scan_downloads: Some(settings.scan_downloads),
+        auto_import: Some(settings.auto_import),
     }
 }
 
@@ -630,7 +991,7 @@ fn write_env_file(path: &Path, updates: &HashMap<String, String>) -> Result<(), 
 fn validate_request(request: &WorkflowRequest) -> Result<(), String> {
     if !matches!(
         request.action.as_str(),
-        "first" | "daily" | "probe" | "retry"
+        "first" | "daily" | "probe" | "retry" | "import"
     ) {
         return Err("未知操作。".to_string());
     }
@@ -642,6 +1003,15 @@ fn validate_request(request: &WorkflowRequest) -> Result<(), String> {
     }
     if request.action == "retry" && request.rounds == 0 {
         return Err("重试轮数必须大于 0。".to_string());
+    }
+    if request.action == "import" {
+        let zip = request.zip.as_deref().unwrap_or("").trim();
+        if zip.is_empty() || !Path::new(zip).is_file() {
+            return Err("导入前需要选择有效的 Flomo ZIP。".to_string());
+        }
+        if request.publish_root.trim().is_empty() {
+            return Err("导入前需要设置发布目录。".to_string());
+        }
     }
     Ok(())
 }
@@ -656,7 +1026,10 @@ fn build_sidecar_args(request: &WorkflowRequest, project_root: &Path) -> Vec<Str
         request.env_file.clone(),
     ];
 
-    if matches!(request.action.as_str(), "first" | "daily" | "retry") {
+    if matches!(
+        request.action.as_str(),
+        "first" | "daily" | "retry" | "import"
+    ) {
         args.extend(["--provider".to_string(), request.provider.clone()]);
     }
 
@@ -670,6 +1043,13 @@ fn build_sidecar_args(request: &WorkflowRequest, project_root: &Path) -> Vec<Str
         "--chunks-root".to_string(),
         request.chunks_root.clone(),
     ]);
+
+    if request.action == "import" {
+        if let Some(zip) = request.zip.as_ref() {
+            args.extend(["--zip".to_string(), zip.clone()]);
+        }
+        args.extend(["--publish-root".to_string(), request.publish_root.clone()]);
+    }
 
     if let Some(month) = request
         .month
@@ -694,7 +1074,10 @@ fn build_sidecar_args(request: &WorkflowRequest, project_root: &Path) -> Vec<Str
 }
 
 #[cfg(debug_assertions)]
-fn build_local_python_command(request: &WorkflowRequest, project_root: &Path) -> (String, Vec<String>) {
+fn build_local_python_command(
+    request: &WorkflowRequest,
+    project_root: &Path,
+) -> (String, Vec<String>) {
     let mut args = vec![
         "scripts/guide.py".to_string(),
         "--action".to_string(),
@@ -703,7 +1086,10 @@ fn build_local_python_command(request: &WorkflowRequest, project_root: &Path) ->
         request.env_file.clone(),
     ];
 
-    if matches!(request.action.as_str(), "first" | "daily" | "retry") {
+    if matches!(
+        request.action.as_str(),
+        "first" | "daily" | "retry" | "import"
+    ) {
         args.extend(["--provider".to_string(), request.provider.clone()]);
     }
 
@@ -717,6 +1103,13 @@ fn build_local_python_command(request: &WorkflowRequest, project_root: &Path) ->
         "--chunks-root".to_string(),
         request.chunks_root.clone(),
     ]);
+
+    if request.action == "import" {
+        if let Some(zip) = request.zip.as_ref() {
+            args.extend(["--zip".to_string(), zip.clone()]);
+        }
+        args.extend(["--publish-root".to_string(), request.publish_root.clone()]);
+    }
 
     if let Some(month) = request
         .month
@@ -771,12 +1164,7 @@ fn emit_output(app: &AppHandle, task_id: &str, stream: &str, bytes: &[u8]) {
     );
 }
 
-fn finish_workflow(
-    app: AppHandle,
-    task_id: String,
-    mut status: String,
-    code: Option<i32>,
-) {
+fn finish_workflow(app: AppHandle, task_id: String, mut status: String, code: Option<i32>) {
     let state = app.state::<Mutex<WorkflowState>>();
     if let Ok(mut guarded) = state.lock() {
         if let Some(active) = &guarded.active {
@@ -841,7 +1229,9 @@ fn kill_process(pid: u32) -> Result<(), String> {
         .status();
 
     #[cfg(not(target_os = "windows"))]
-    let status = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let status = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
 
     match status {
         Ok(status) if status.success() => Ok(()),
@@ -862,6 +1252,10 @@ mod tests {
             store_root: "store".to_string(),
             monthly_root: "monthly".to_string(),
             chunks_root: "llm_chunks".to_string(),
+            inbox_root: "flomo-inbox".to_string(),
+            publish_root: "flomo-context".to_string(),
+            scan_downloads: true,
+            auto_import: true,
             vlm_base_url: "http://127.0.0.1:1234/v1".to_string(),
             vlm_model: "local-vlm".to_string(),
             vlm_retry_model: String::new(),
@@ -903,6 +1297,9 @@ mod tests {
         settings.store_root = "D:/Flomo/store".to_string();
         settings.monthly_root = "D:/Flomo/monthly".to_string();
         settings.chunks_root = "D:/Flomo/chunks".to_string();
+        settings.inbox_root = "D:/Flomo/inbox".to_string();
+        settings.publish_root = "D:/Flomo/context".to_string();
+        settings.scan_downloads = false;
 
         write_gui_path_settings(&settings_file, &settings).unwrap();
         let content = fs::read_to_string(&settings_file).unwrap();
@@ -912,6 +1309,9 @@ mod tests {
         assert!(!content.contains("vlm_model"));
         assert_eq!(stored.raw_root.as_deref(), Some("D:/Flomo/raw"));
         assert_eq!(stored.store_root.as_deref(), Some("D:/Flomo/store"));
+        assert_eq!(stored.inbox_root.as_deref(), Some("D:/Flomo/inbox"));
+        assert_eq!(stored.publish_root.as_deref(), Some("D:/Flomo/context"));
+        assert_eq!(stored.scan_downloads, Some(false));
         assert_eq!(
             setting_path_or_default(stored.monthly_root, PathBuf::from("monthly")),
             "D:/Flomo/monthly"
@@ -947,8 +1347,10 @@ mod tests {
             store_root: "store".to_string(),
             monthly_root: "monthly".to_string(),
             chunks_root: "llm_chunks".to_string(),
+            publish_root: "flomo-context".to_string(),
             env_file: ".env".to_string(),
             image: None,
+            zip: None,
             rounds: 3,
         };
 
@@ -968,8 +1370,10 @@ mod tests {
             store_root: "store".to_string(),
             monthly_root: "monthly".to_string(),
             chunks_root: "llm_chunks".to_string(),
+            publish_root: "flomo-context".to_string(),
             env_file: ".env".to_string(),
             image: Some("store/images/example.png".to_string()),
+            zip: None,
             rounds: 3,
         };
 
@@ -977,6 +1381,92 @@ mod tests {
         assert!(has_arg_pair(&args, "--action", "probe"));
         assert!(has_arg_pair(&args, "--image", "store/images/example.png"));
         assert!(!args.iter().any(|arg| arg == "--provider"));
+    }
+
+    #[test]
+    fn command_builder_maps_import_zip_and_publish_root() {
+        let request = WorkflowRequest {
+            action: "import".to_string(),
+            provider: "lmstudio".to_string(),
+            month: None,
+            raw_root: "raw".to_string(),
+            store_root: "store".to_string(),
+            monthly_root: "monthly".to_string(),
+            chunks_root: "llm_chunks".to_string(),
+            publish_root: "flomo-context".to_string(),
+            env_file: ".env".to_string(),
+            image: None,
+            zip: Some("flomo-inbox/flomo-export.zip".to_string()),
+            rounds: 3,
+        };
+
+        let args = build_sidecar_args(&request, Path::new("project"));
+        assert!(has_arg_pair(&args, "--action", "import"));
+        assert!(has_arg_pair(&args, "--zip", "flomo-inbox/flomo-export.zip"));
+        assert!(has_arg_pair(&args, "--publish-root", "flomo-context"));
+        assert!(has_arg_pair(&args, "--provider", "lmstudio"));
+    }
+
+    #[test]
+    fn zip_readiness_rejects_partial_and_accepts_empty_archive() {
+        let dir = std::env::temp_dir().join(new_task_id());
+        fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("flomo-partial.zip");
+        fs::write(&partial, b"PK\x03\x04unfinished").unwrap();
+        assert!(!zip_directory_is_readable(&partial));
+
+        let complete = dir.join("flomo-complete.zip");
+        fs::write(
+            &complete,
+            [
+                0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+        assert!(zip_directory_is_readable(&complete));
+    }
+
+    #[test]
+    fn inbox_filter_and_two_scan_stability_match_import_contract() {
+        assert!(looks_like_flomo_zip(Path::new(
+            "flomo@ExampleUser-20260817.zip"
+        )));
+        assert!(looks_like_flomo_zip(Path::new(
+            "flomo@ExampleUser-20260817-deadbeef.zip"
+        )));
+        assert!(!looks_like_flomo_zip(Path::new("notes-20260817.zip")));
+
+        let previous = FileObservation {
+            size: 42,
+            modified_millis: 100,
+        };
+        assert!(observation_is_unchanged(Some(&previous), 42, 100));
+        assert!(!observation_is_unchanged(Some(&previous), 43, 100));
+        assert!(!observation_is_unchanged(None, 42, 100));
+    }
+
+    #[test]
+    fn import_status_keeps_image_failure_reasons() {
+        let value = serde_json::json!({
+            "imports": [{
+                "original_filename": "flomo@ExampleUser-20260817.zip",
+                "status": "published",
+                "failed_images": 1,
+                "image_failures": [{
+                    "image_id": "image-1",
+                    "month": "2026-08",
+                    "error_message": "model response was truncated"
+                }]
+            }]
+        });
+        let entries = import_entries_from_json(&value);
+
+        assert_eq!(entries[0].failed_images, 1);
+        assert_eq!(entries[0].image_failures[0].month, "2026-08");
+        assert_eq!(
+            entries[0].image_failures[0].error_message,
+            "model response was truncated"
+        );
     }
 
     fn has_arg_pair(args: &[String], key: &str, value: &str) -> bool {

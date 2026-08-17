@@ -46,3 +46,6 @@ class ParseResult:
     memos: list[MemoRecord]
     images: list[ImageRecord]
     missing_images: list[MissingImageRecord]
+    deduplicated_count: int = 0
+    possible_revision_count: int = 0
+    image_id_aliases: dict[str, str] = dataclasses.field(default_factory=dict)

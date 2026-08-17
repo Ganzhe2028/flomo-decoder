@@ -125,6 +125,43 @@ python scripts/guide.py --action retry --provider lmstudio --month 2025-12
 python scripts/guide.py --action probe --image store/images/2025/2025-12/example.png
 ```
 
+## Incremental Inbox and Mac Delivery
+
+The Windows GUI can receive a Flomo ZIP directly, so you no longer need to unpack, rename, and move every export into `raw/`.
+
+The export start date is always the date of the latest successfully published memo, **without adding one day**. If the latest imported memo is `2026-08-17 18:51:37`, the next export must still start on `2026-08-17`. Earlier records from that day are deduplicated, while memos written later that day remain included.
+
+Choose Incremental Inbox in the GUI, or run:
+
+```bash
+python scripts/guide.py --action import --zip "Downloads/flomo@User-20260817.zip" --publish-root "flomo-context" --provider lmstudio
+```
+
+A successful run publishes an immutable snapshot:
+
+```text
+flomo-context/
+├── latest.json
+└── snapshots/<release-id>/
+    ├── manifest.json
+    └── llm_chunks/YYYY-MM/*.json
+```
+
+`latest.json` is updated only after import, deduplication, image enrichment, chunk generation, and validation finish. Final image failures and their reasons are reported in both the manifest and GUI, but do not block every newer memo.
+
+The first incremental import rebuilds historical months once to migrate overlaps from older batches. Later imports rebuild only the months affected by that ZIP.
+
+For automatic Windows-to-Mac delivery, install Syncthing on both devices and create two shared folders:
+
+| Folder | Windows | Mac | Purpose |
+| --- | --- | --- | --- |
+| `flomo-inbox` | Send & Receive | Send & Receive | Accept exports saved from either device |
+| `flomo-context` | Send Only | Receive Only | Publish complete snapshots from Windows to Mac |
+
+Select those local folders in GUI settings and enable automatic inbox processing. While the GUI is open, it watches the inbox and can also scan Windows Downloads. Incomplete ZIPs are ignored; imports wait when LM Studio is unavailable.
+
+Hermes/OpenClaw should read `latest.json`, follow its snapshot manifest, and only use files after their hashes match. See [Syncthing Security Principles](https://docs.syncthing.net/v1.0.0/users/security.html) for transport and device-security details.
+
 ## Desktop GUI
 
 The repository includes a development Tauri desktop GUI here:
@@ -133,7 +170,7 @@ The repository includes a development Tauri desktop GUI here:
 gui/
 ```
 
-The GUI wraps the four common user actions:
+The GUI wraps the five common user actions:
 
 | Action | Command |
 | --- | --- |
@@ -141,8 +178,9 @@ The GUI wraps the four common user actions:
 | Daily update | `python scripts/guide.py --action daily` |
 | Probe one image | `python scripts/guide.py --action probe` |
 | Retry failed images | `python scripts/guide.py --action retry` |
+| Incremental inbox | `python scripts/guide.py --action import` |
 
-The GUI reads and writes `.env`. You can set the LM Studio base URL, vision model, retry model, timeout, and max tokens in the interface. Folder paths are saved to `.flomo-gui-settings.json`, so the next launch keeps the last selected locations. Both `.env` and `.flomo-gui-settings.json` are ignored by Git.
+The GUI reads and writes `.env`. You can set the LM Studio base URL, vision model, retry model, timeout, and max tokens in the interface, plus the inbox, publish folder, Downloads scanning, and automatic import. Folder paths are saved to `.flomo-gui-settings.json`, so the next launch keeps the last selected locations. Both `.env` and `.flomo-gui-settings.json` are ignored by Git.
 
 Development startup:
 

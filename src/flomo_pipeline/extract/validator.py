@@ -29,6 +29,7 @@ class Rule(StrEnum):
     C9_SOURCE_FILE_EXPECTATION = "C9"
     C10_CREATED_AT_ISO = "C10"
     C11_NO_FRONTMATTER = "C11"
+    C12_MEMO_HAS_CONTENT = "C12"
     R1_MEMO_JSONL_PARSEABLE = "R1"
     R2_IMAGE_JSONL_PARSEABLE = "R2"
     R3_MISSING_IMAGE_JSONL_PARSEABLE = "R3"
@@ -48,7 +49,7 @@ MEMO_FIELDS = {
 IMAGE_FIELDS = {"image_id", "memo_id", "image_relpath", "source_relpath", "ordinal"}
 MISSING_FIELDS = {"image_id", "memo_id", "source_relpath", "ordinal", "reason"}
 
-MEMO_KEY_FIELDS = {"memo_id", "created_at", "body_md", "source_relpath", "batch_label"}
+MEMO_KEY_FIELDS = {"memo_id", "created_at", "source_relpath", "batch_label"}
 IMAGE_KEY_FIELDS = {"image_id", "memo_id", "image_relpath", "source_relpath"}
 MISSING_KEY_FIELDS = {"image_id", "memo_id", "source_relpath", "reason"}
 
@@ -153,6 +154,7 @@ class StoreValidator:
         self._check_source_files_exist(memos, images, missing_images, report)
         self._check_iso8601(memos, report)
         self._check_image_count(memos, images, missing_images, report)
+        self._check_memo_has_content(memos, report)
         self._check_frontmatter(memos, report)
 
         return report
@@ -423,6 +425,26 @@ class StoreValidator:
                         rule=Rule.C11_NO_FRONTMATTER,
                         severity=Severity.WARNING,
                         message="body_md starts with frontmatter-like header",
+                        table="memo.raw",
+                        line=line_number,
+                        record_id=str(record.get("memo_id", "")),
+                    )
+                )
+
+    def _check_memo_has_content(
+        self,
+        memos: list[dict[str, Any]],
+        report: ValidationReport,
+    ) -> None:
+        for line_number, record in enumerate(memos, start=1):
+            body_md = record.get("body_md")
+            image_count = record.get("image_count")
+            if isinstance(body_md, str) and not body_md.strip() and image_count == 0:
+                report.add(
+                    Violation(
+                        rule=Rule.C12_MEMO_HAS_CONTENT,
+                        severity=Severity.ERROR,
+                        message="Memo must contain text or at least one image",
                         table="memo.raw",
                         line=line_number,
                         record_id=str(record.get("memo_id", "")),

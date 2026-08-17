@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 import re
+from collections import defaultdict
 from pathlib import Path, PurePosixPath
-from typing import Optional
 
 from bs4 import BeautifulSoup, Tag
 
@@ -13,7 +14,9 @@ def _discover_html_files(batch_dir: Path) -> list[Path]:
     html_files = [
         candidate
         for candidate in batch_dir.iterdir()
-        if candidate.is_file() and candidate.suffix.lower() == ".html" and candidate.name != ".DS_Store"
+        if candidate.is_file()
+        and candidate.suffix.lower() == ".html"
+        and candidate.name != ".DS_Store"
     ]
     return sorted(html_files)
 
@@ -33,7 +36,7 @@ def _slugify_user(name: str) -> str:
 
 
 def _extract_batch_label(batch_dir_name: str) -> str:
-    pattern = r"flomo@(.+?)-(\d{8})"
+    pattern = r"flomo@(.+?)-(\d{8}(?:__[^/\\]+)?)$"
     match = re.search(pattern, batch_dir_name)
     if not match:
         raise ValueError(f"Cannot parse batch label from directory: {batch_dir_name}")
@@ -78,7 +81,9 @@ def _html_to_markdown(content_div: Tag) -> str:
             continue
         elif tag == "div":
             class_list = element.get("class")
-            if isinstance(class_list, list) and ("files" in class_list or "audio-player" in class_list):
+            if isinstance(class_list, list) and (
+                "files" in class_list or "audio-player" in class_list
+            ):
                 continue
             parts.append(_html_to_markdown(element))
 
@@ -135,7 +140,7 @@ def _html_list_to_markdown(element: Tag) -> str:
     return "\n".join(items)
 
 
-def _parse_time(time_div: Tag) -> Optional[str]:
+def _parse_time(time_div: Tag) -> str | None:
     raw = time_div.get_text(strip=True)
     pattern = r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2}):?(\d{2})?"
     match = re.match(pattern, raw)
@@ -143,7 +148,10 @@ def _parse_time(time_div: Tag) -> Optional[str]:
         return None
     year, month, day, hour, minute, second = match.groups()
     second = second or "00"
-    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}T{int(hour):02d}:{minute}:{int(second):02d}"
+    return (
+        f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        f"T{int(hour):02d}:{minute}:{int(second):02d}"
+    )
 
 
 def _format_ordinal(value: int, *, width: int = 4) -> str:
@@ -154,6 +162,18 @@ def _to_posix(path: Path | PurePosixPath) -> str:
     return path.as_posix()
 
 
+def _memo_user_slug(record: MemoRecord) -> str:
+    suffix = f"-{record.batch_label}--{_format_ordinal(record.ordinal)}"
+    if record.memo_id.startswith("flomo-") and record.memo_id.endswith(suffix):
+        return record.memo_id[len("flomo-") : -len(suffix)]
+    return record.memo_id
+
+
+def _canonical_image_relpath(image_relpath: str, canonical_image_id: str) -> str:
+    path = PurePosixPath(image_relpath)
+    return _to_posix(path.with_name(f"{canonical_image_id}{path.suffix}"))
+
+
 class FlomoParser:
     def __init__(self, raw_root: Path, store_root: Path) -> None:
         self.raw_root = raw_root
@@ -161,20 +181,114 @@ class FlomoParser:
 
     def parse_all(self) -> ParseResult:
         all_memos: list[MemoRecord] = []
-        all_images: list[ImageRecord] = []
-        all_missing: list[MissingImageRecord] = []
+        images_by_id: dict[str, ImageRecord] = {}
+        missing_by_id: dict[str, MissingImageRecord] = {}
+        canonical_by_overlap: dict[tuple[str, str, str, int, int], MemoRecord] = {}
+        prior_bodies_by_time: dict[tuple[str, str], set[str]] = defaultdict(set)
+        image_id_aliases: dict[str, str] = {}
+        deduplicated_count = 0
+        possible_revision_count = 0
 
         for batch_dir in self._discover_batches():
             result = self.parse_batch(batch_dir)
-            all_memos.extend(result.memos)
-            all_images.extend(result.images)
-            all_missing.extend(result.missing_images)
+            images_by_memo: dict[str, list[ImageRecord]] = defaultdict(list)
+            missing_by_memo: dict[str, list[MissingImageRecord]] = defaultdict(list)
+            for image in result.images:
+                images_by_memo[image.memo_id].append(image)
+            for missing in result.missing_images:
+                missing_by_memo[missing.memo_id].append(missing)
+
+            occurrences: dict[tuple[str, str, str, int], int] = defaultdict(int)
+            batch_bodies_by_time: dict[tuple[str, str], set[str]] = defaultdict(set)
+            for memo in result.memos:
+                user_slug = _memo_user_slug(memo)
+                signature = (user_slug, memo.created_at, memo.body_md, memo.image_count)
+                occurrences[signature] += 1
+                overlap_key = (*signature, occurrences[signature])
+                time_key = (user_slug, memo.created_at)
+
+                prior_bodies = prior_bodies_by_time.get(time_key)
+                if prior_bodies and memo.body_md not in prior_bodies:
+                    possible_revision_count += 1
+                batch_bodies_by_time[time_key].add(memo.body_md)
+
+                canonical = canonical_by_overlap.get(overlap_key)
+                if canonical is None:
+                    canonical_by_overlap[overlap_key] = memo
+                    all_memos.append(memo)
+                    for image in images_by_memo[memo.memo_id]:
+                        images_by_id[image.image_id] = image
+                    for missing in missing_by_memo[memo.memo_id]:
+                        missing_by_id[missing.image_id] = missing
+                    continue
+
+                deduplicated_count += 1
+                self._merge_duplicate_images(
+                    canonical=canonical,
+                    duplicate_images=images_by_memo[memo.memo_id],
+                    duplicate_missing=missing_by_memo[memo.memo_id],
+                    images_by_id=images_by_id,
+                    missing_by_id=missing_by_id,
+                    image_id_aliases=image_id_aliases,
+                )
+
+            for time_key, bodies in batch_bodies_by_time.items():
+                prior_bodies_by_time[time_key].update(bodies)
 
         all_memos.sort(key=lambda record: record.memo_id)
-        all_images.sort(key=lambda record: record.image_id)
-        all_missing.sort(key=lambda record: record.image_id)
+        all_images = sorted(images_by_id.values(), key=lambda record: record.image_id)
+        all_missing = sorted(missing_by_id.values(), key=lambda record: record.image_id)
 
-        return ParseResult(memos=all_memos, images=all_images, missing_images=all_missing)
+        return ParseResult(
+            memos=all_memos,
+            images=all_images,
+            missing_images=all_missing,
+            deduplicated_count=deduplicated_count,
+            possible_revision_count=possible_revision_count,
+            image_id_aliases=image_id_aliases,
+        )
+
+    @staticmethod
+    def _merge_duplicate_images(
+        *,
+        canonical: MemoRecord,
+        duplicate_images: list[ImageRecord],
+        duplicate_missing: list[MissingImageRecord],
+        images_by_id: dict[str, ImageRecord],
+        missing_by_id: dict[str, MissingImageRecord],
+        image_id_aliases: dict[str, str],
+    ) -> None:
+        for image in duplicate_images:
+            canonical_image_id = (
+                f"{canonical.memo_id}--{_format_ordinal(image.ordinal, width=2)}"
+            )
+            image_id_aliases[image.image_id] = canonical_image_id
+            if canonical_image_id in images_by_id:
+                continue
+            remapped = dataclasses.replace(
+                image,
+                image_id=canonical_image_id,
+                memo_id=canonical.memo_id,
+                image_relpath=_canonical_image_relpath(
+                    image.image_relpath,
+                    canonical_image_id,
+                ),
+            )
+            missing_by_id.pop(canonical_image_id, None)
+            images_by_id[canonical_image_id] = remapped
+
+        for missing in duplicate_missing:
+            canonical_image_id = (
+                f"{canonical.memo_id}--{_format_ordinal(missing.ordinal, width=2)}"
+            )
+            image_id_aliases[missing.image_id] = canonical_image_id
+            if canonical_image_id in images_by_id or canonical_image_id in missing_by_id:
+                continue
+            missing_by_id[canonical_image_id] = dataclasses.replace(
+                missing,
+                image_id=canonical_image_id,
+                memo_id=canonical.memo_id,
+            )
 
     def parse_batch(self, batch_dir: Path) -> ParseResult:
         html_files = _discover_html_files(batch_dir)

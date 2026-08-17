@@ -3,11 +3,14 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
+  Archive,
+  CalendarClock,
   CheckCircle2,
   ChevronsDown,
   Copy,
   FileImage,
   FolderOpen,
+  Inbox,
   Moon,
   PauseCircle,
   Play,
@@ -21,7 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type WorkflowAction = "first" | "daily" | "probe" | "retry";
+type WorkflowAction = "first" | "daily" | "probe" | "retry" | "import";
 type Provider = "lmstudio" | "mock";
 type RunStatus = "idle" | "running" | "success" | "failed" | "cancelled";
 
@@ -32,6 +35,10 @@ type AppSettings = {
   store_root: string;
   monthly_root: string;
   chunks_root: string;
+  inbox_root: string;
+  publish_root: string;
+  scan_downloads: boolean;
+  auto_import: boolean;
   vlm_base_url: string;
   vlm_model: string;
   vlm_retry_model: string;
@@ -49,10 +56,40 @@ type WorkflowRequest = {
   store_root: string;
   monthly_root: string;
   chunks_root: string;
+  publish_root: string;
   env_file: string;
   image?: string;
+  zip?: string;
   rounds: number;
 };
+
+type ZipCandidate = {
+  path: string;
+  name: string;
+  size: number;
+  modified_millis: number;
+  source: "inbox" | "downloads";
+  stable: boolean;
+};
+
+type ImportStatus = {
+  suggested_export_date: string | null;
+  latest_memo_at: string | null;
+  last_release: string | null;
+  imports: Array<{
+    original_filename: string;
+    status: string;
+    error_message: string | null;
+    failed_images: number;
+    image_failures: Array<{
+      image_id: string;
+      month: string;
+      error_message: string;
+    }>;
+  }>;
+};
+
+type QueueStatus = "running" | "queued" | "success" | "failed" | "cancelled";
 
 type WorkflowStarted = {
   task_id: string;
@@ -84,6 +121,10 @@ const defaultSettings: AppSettings = {
   store_root: "store",
   monthly_root: "monthly",
   chunks_root: "llm_chunks",
+  inbox_root: "flomo-inbox",
+  publish_root: "flomo-context",
+  scan_downloads: true,
+  auto_import: true,
   vlm_base_url: "http://127.0.0.1:1234/v1",
   vlm_model: "",
   vlm_retry_model: "",
@@ -97,6 +138,11 @@ const actionMeta: Record<
   WorkflowAction,
   { label: string; description: string; icon: typeof Play }
 > = {
+  import: {
+    label: "增量收件",
+    description: "接收 Flomo ZIP，自动去重、转换并发布完整快照。",
+    icon: Inbox,
+  },
   first: {
     label: "首次生成",
     description: "从 raw/ 生成可交给外部 LLM 的 chunks。",
@@ -134,13 +180,31 @@ function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const logOutputRef = useRef<HTMLDivElement>(null);
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
+  const [selectedZip, setSelectedZip] = useState("");
+  const [zipCandidates, setZipCandidates] = useState<ZipCandidate[]>([]);
+  const [queueStatuses, setQueueStatuses] = useState<Record<string, QueueStatus>>({});
+  const [scanError, setScanError] = useState("");
+  const [importStatus, setImportStatus] = useState<ImportStatus>({
+    suggested_export_date: null,
+    latest_memo_at: null,
+    last_release: null,
+    imports: [],
+  });
+  const latestPublishedImport = [...importStatus.imports]
+    .reverse()
+    .find((entry) => entry.status === "published");
+  const settingsRef = useRef<AppSettings>(defaultSettings);
+  const activeImportPathRef = useRef<string | null>(null);
+  const activeImportZipRef = useRef<string | null>(null);
+  const attemptedAutoImportsRef = useRef(new Set<string>());
 
   const lmstudioReady =
     settings.vlm_base_url.trim().length > 0 && settings.vlm_model.trim().length > 0;
   const canRun =
     status !== "running" &&
     (provider === "mock" && action !== "probe" ? true : lmstudioReady) &&
-    (action !== "probe" || image.trim().length > 0);
+    (action !== "probe" || image.trim().length > 0) &&
+    (action !== "import" || selectedZip.trim().length > 0);
 
   const configState = useMemo(() => {
     if (provider === "mock" && action !== "probe") {
@@ -161,6 +225,10 @@ function App() {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("flomo-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   function toggleTheme() {
     setTheme((t) => (t === "dark" ? "light" : "dark"));
@@ -183,12 +251,52 @@ function App() {
     const unlistenCompleted = listen<WorkflowCompleted>("workflow-completed", (event) => {
       setStatus(event.payload.status);
       setActiveTaskId(null);
+      const importKey = activeImportPathRef.current;
+      const importedZip = activeImportZipRef.current;
+      if (importKey && importedZip) {
+        activeImportPathRef.current = null;
+        activeImportZipRef.current = null;
+        const currentSettings = settingsRef.current;
+        invoke<ImportStatus>("read_import_status", {
+          rawRoot: currentSettings.raw_root,
+          publishRoot: currentSettings.publish_root,
+        })
+          .then((nextStatus) => {
+            setImportStatus(nextStatus);
+            const filename = fileNameFromPath(importedZip);
+            const entry = [...nextStatus.imports]
+              .reverse()
+              .find((item) => item.original_filename === filename);
+            if (entry?.status === "queued") {
+              setStatus("idle");
+              setQueueStatuses((current) => ({ ...current, [importKey]: "queued" }));
+              pushSystemLog(`已排队：${entry.error_message || "等待 LM Studio 可用"}`);
+              window.setTimeout(() => {
+                attemptedAutoImportsRef.current.delete(importKey);
+                setQueueStatuses((current) => {
+                  const next = { ...current };
+                  delete next[importKey];
+                  return next;
+                });
+              }, 60_000);
+              return;
+            }
+            const resolved = entry?.status === "published" ? "success" : event.payload.status;
+            setQueueStatuses((current) => ({ ...current, [importKey]: resolved }));
+          })
+          .catch(() => {
+            setQueueStatuses((current) => ({
+              ...current,
+              [importKey]: event.payload.status,
+            }));
+          });
+      }
       const suffix =
         event.payload.code === null ? "" : `，退出码 ${event.payload.code.toString()}`;
       pushSystemLog(`任务${statusLabel(event.payload.status)}${suffix}`);
       // Refresh available months in case new raw data was added
-      if (settings.raw_root) {
-        invoke<string[]>("list_available_months", { rawRoot: settings.raw_root })
+      if (settingsRef.current.raw_root) {
+        invoke<string[]>("list_available_months", { rawRoot: settingsRef.current.raw_root })
           .then((months) => setAvailableMonths(months.reverse()))
           .catch(() => {});
       }
@@ -219,6 +327,64 @@ function App() {
       .catch(() => setAvailableMonths([]));
   }, [settings.raw_root]);
 
+  useEffect(() => {
+    if (!settings.inbox_root.trim()) {
+      setZipCandidates([]);
+      return;
+    }
+    let disposed = false;
+    const scan = () => {
+      invoke<ZipCandidate[]>("scan_import_zips", {
+        inboxRoot: settings.inbox_root,
+        scanDownloads: settings.scan_downloads,
+      })
+        .then((candidates) => {
+          if (!disposed) {
+            setZipCandidates(candidates);
+            setScanError("");
+          }
+        })
+        .catch((error) => {
+          if (!disposed) setScanError(String(error));
+        });
+    };
+    scan();
+    const timer = window.setInterval(scan, 3000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [settings.inbox_root, settings.scan_downloads]);
+
+  useEffect(() => {
+    if (!settings.raw_root.trim() || !settings.publish_root.trim()) return;
+    invoke<ImportStatus>("read_import_status", {
+      rawRoot: settings.raw_root,
+      publishRoot: settings.publish_root,
+    })
+      .then(setImportStatus)
+      .catch(() => {});
+  }, [settings.publish_root, settings.raw_root]);
+
+  useEffect(() => {
+    if (!settings.auto_import || status === "running") return;
+    if (provider !== "mock" && !lmstudioReady) return;
+    const next = zipCandidates.find((candidate) => {
+      const key = candidateKey(candidate);
+      return (
+        candidate.stable &&
+        !attemptedAutoImportsRef.current.has(key) &&
+        queueStatuses[key] === undefined
+      );
+    });
+    if (!next) return;
+    const key = candidateKey(next);
+    attemptedAutoImportsRef.current.add(key);
+    setAction("import");
+    setSelectedZip(next.path);
+    void runWorkflow(next.path, true, key);
+  }, [lmstudioReady, provider, queueStatuses, settings.auto_import, status, zipCandidates]);
+
   async function loadSettings() {
     const next = await invoke<AppSettings>("read_settings");
     setSettings(next);
@@ -245,7 +411,15 @@ function App() {
     pushSystemLog("配置已保存");
   }
 
-  async function chooseDirectory(field: "raw_root" | "store_root" | "monthly_root" | "chunks_root") {
+  async function chooseDirectory(
+    field:
+      | "raw_root"
+      | "store_root"
+      | "monthly_root"
+      | "chunks_root"
+      | "inbox_root"
+      | "publish_root",
+  ) {
     const selected = await open({
       directory: true,
       multiple: false,
@@ -272,29 +446,54 @@ function App() {
     }
   }
 
-  async function runWorkflow() {
+  async function chooseZip() {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      defaultPath: settings.inbox_root,
+      filters: [{ name: "Flomo 导出", extensions: ["zip"] }],
+    });
+    if (typeof selected === "string") {
+      setSelectedZip(selected);
+      setAction("import");
+    }
+  }
+
+  async function runWorkflow(importZip?: string, automatic = false, importKey?: string) {
+    const requestedAction: WorkflowAction = importZip ? "import" : action;
+    const zip = importZip ?? selectedZip;
+    const queueKey = importKey ?? zip;
     setLogs([]);
     setStatus("running");
     setLastOutputPath("");
+    if (requestedAction === "import" && queueKey) {
+      activeImportPathRef.current = queueKey;
+      activeImportZipRef.current = zip;
+      setQueueStatuses((current) => ({ ...current, [queueKey]: "running" }));
+    }
     try {
       await invoke("save_settings", { settings });
       const request: WorkflowRequest = {
-        action,
+        action: requestedAction,
         provider,
-        month: month.trim() || undefined,
+        month: requestedAction === "import" ? undefined : month.trim() || undefined,
         raw_root: settings.raw_root,
         store_root: settings.store_root,
         monthly_root: settings.monthly_root,
         chunks_root: settings.chunks_root,
+        publish_root: settings.publish_root,
         env_file: settings.env_file,
         image: image.trim() || undefined,
+        zip: requestedAction === "import" ? zip : undefined,
         rounds,
       };
       const started = await invoke<WorkflowStarted>("run_workflow", { request });
       setActiveTaskId(started.task_id);
       setActiveCommand(started.command);
-      pushSystemLog(`已启动：${started.command}`);
-      if (action === "first" || action === "daily") {
+      pushSystemLog(`${automatic ? "自动收件已启动" : "已启动"}：${started.command}`);
+      if (requestedAction === "import") {
+        setLastOutputPath(settings.publish_root);
+      } else if (requestedAction === "first" || requestedAction === "daily") {
         setLastOutputPath(
           month.trim() ? `${settings.chunks_root}/${month.trim()}` : settings.chunks_root,
         );
@@ -302,6 +501,11 @@ function App() {
     } catch (error) {
       setStatus("failed");
       setActiveTaskId(null);
+      if (requestedAction === "import" && queueKey) {
+        activeImportPathRef.current = null;
+        activeImportZipRef.current = null;
+        setQueueStatuses((current) => ({ ...current, [queueKey]: "failed" }));
+      }
       pushSystemLog(String(error));
     }
   }
@@ -402,8 +606,12 @@ function App() {
           {/* ── 运行设置（置顶 — 每次都要调整的核心参数）── */}
           <section className="sectionBlock">
             <div className="sectionTitle">
-              <Settings size={18} aria-hidden="true" />
-              <h3>运行设置</h3>
+              {action === "import" ? (
+                <CalendarClock size={18} aria-hidden="true" />
+              ) : (
+                <Settings size={18} aria-hidden="true" />
+              )}
+              <h3>{action === "import" ? "同步状态" : "运行设置"}</h3>
               <button
                 className="iconButton"
                 type="button"
@@ -414,6 +622,132 @@ function App() {
                 <FolderOpen size={16} aria-hidden="true" />
               </button>
             </div>
+            {action === "import" ? (
+              <div className="importWorkspace">
+                <div className="syncSummary">
+                  <div>
+                    <span>下次导出起始日</span>
+                    <strong>{importStatus.suggested_export_date || "首次导入后显示"}</strong>
+                  </div>
+                  <p>始终包含最后一天，程序会去除重叠内容。</p>
+                </div>
+
+                <label className="field">
+                  <span>待导入 ZIP</span>
+                  <div className="inlinePicker">
+                    <input
+                      value={selectedZip}
+                      disabled={status === "running"}
+                      onChange={(event) => setSelectedZip(event.target.value)}
+                      placeholder="选择 Flomo 导出 ZIP"
+                    />
+                    <button
+                      className="iconButton"
+                      title="选择 Flomo ZIP"
+                      type="button"
+                      disabled={status === "running"}
+                      onClick={() => void chooseZip()}
+                    >
+                      <Archive size={18} aria-hidden="true" />
+                    </button>
+                  </div>
+                </label>
+
+                <div className="importOptions">
+                  <label className="switchField">
+                    <input
+                      type="checkbox"
+                      checked={settings.auto_import}
+                      disabled={status === "running"}
+                      onChange={(event) => updateSettings("auto_import", event.target.checked)}
+                    />
+                    <span>发现完整 ZIP 后自动处理</span>
+                  </label>
+                  <label className="field compactField">
+                    <span>图片处理</span>
+                    <select
+                      value={provider}
+                      disabled={status === "running"}
+                      onChange={(event) => setProvider(event.target.value as Provider)}
+                    >
+                      <option value="lmstudio">LM Studio</option>
+                      <option value="mock">mock</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="queueHeader">
+                  <span>收件队列</span>
+                  <span>{zipCandidates.length} 个 ZIP</span>
+                </div>
+                <div className="queueList" aria-live="polite">
+                  {zipCandidates.length === 0 ? (
+                    <p className="emptyQueue">正在监控 inbox{settings.scan_downloads ? " 和 Downloads" : ""}。</p>
+                  ) : (
+                    zipCandidates.map((candidate) => {
+                      const key = candidateKey(candidate);
+                      const queueStatus = queueStatuses[key];
+                      const waitingForModel =
+                        settings.auto_import && provider === "lmstudio" && !lmstudioReady;
+                      return (
+                        <div className="queueItem" key={key}>
+                          <div className="queueFile">
+                            <strong title={candidate.path}>{candidate.name}</strong>
+                            <span>
+                              {candidate.source === "downloads" ? "Downloads" : "inbox"} · {formatBytes(candidate.size)}
+                            </span>
+                          </div>
+                          <span className={`queueState ${queueStatus || (candidate.stable ? "ready" : "checking")}`}>
+                            {queueStatus
+                              ? queueStatusLabel(queueStatus)
+                              : candidate.stable
+                                ? waitingForModel
+                                  ? "等待模型"
+                                  : "可导入"
+                                : "确认完整性"}
+                          </span>
+                          <button
+                            className="secondaryButton compact"
+                            type="button"
+                            disabled={!candidate.stable || status === "running" || queueStatus === "success"}
+                            onClick={() => {
+                              setAction("import");
+                              setSelectedZip(candidate.path);
+                              void runWorkflow(candidate.path, false, key);
+                            }}
+                          >
+                            {queueStatus === "failed" ||
+                            queueStatus === "cancelled" ||
+                            queueStatus === "queued"
+                              ? "重试"
+                              : "导入"}
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                {scanError && <p className="inlineError">{scanError}</p>}
+                <p className="syncFootnote">
+                  {importStatus.latest_memo_at
+                    ? `已发布到 ${importStatus.latest_memo_at}`
+                    : "尚无成功发布记录"}
+                  {importStatus.last_release ? ` · ${importStatus.last_release}` : ""}
+                </p>
+                {latestPublishedImport && latestPublishedImport.failed_images > 0 && (
+                  <div className="imageWarnings" role="status">
+                    <strong>
+                      {latestPublishedImport.failed_images} 张图片未完成识别，文字 memo 已正常发布
+                    </strong>
+                    {latestPublishedImport.image_failures.map((failure) => (
+                      <p key={failure.image_id}>
+                        {failure.month} · {failure.image_id}：{failure.error_message}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
             <div className="fieldGrid">
               <label className="field">
                 <span>月份</span>
@@ -477,6 +811,7 @@ function App() {
                 </label>
               )}
             </div>
+            )}
           </section>
 
           {/* ── 主要操作按钮 ── */}
@@ -498,7 +833,7 @@ function App() {
                 onClick={() => void runWorkflow()}
               >
                 <Play size={20} aria-hidden="true" />
-                开始运行
+                {action === "import" ? "导入并发布" : "开始运行"}
               </button>
             )}
           </section>
@@ -509,7 +844,7 @@ function App() {
               <FolderOpen size={16} aria-hidden="true" />
               路径配置
               <span className="collapsiblePathHint">
-                raw · store · monthly · chunks
+                raw · chunks · inbox · publish
               </span>
             </summary>
             <div className="sectionBody">
@@ -541,6 +876,30 @@ function App() {
                 onPick={() => void chooseDirectory("chunks_root")}
                 disabled={status === "running"}
               />
+              <div className="pathDivider" />
+              <PathInput
+                label="inbox"
+                value={settings.inbox_root}
+                onChange={(value) => updateSettings("inbox_root", value)}
+                onPick={() => void chooseDirectory("inbox_root")}
+                disabled={status === "running"}
+              />
+              <PathInput
+                label="publish"
+                value={settings.publish_root}
+                onChange={(value) => updateSettings("publish_root", value)}
+                onPick={() => void chooseDirectory("publish_root")}
+                disabled={status === "running"}
+              />
+              <label className="switchField pathSwitch">
+                <input
+                  type="checkbox"
+                  checked={settings.scan_downloads}
+                  disabled={status === "running"}
+                  onChange={(event) => updateSettings("scan_downloads", event.target.checked)}
+                />
+                <span>同时扫描 Downloads</span>
+              </label>
             </div>
           </details>
 
@@ -603,7 +962,13 @@ function App() {
 
           {/* ── 底部操作栏 ── */}
           <div className="commandHint">
-            {status === "running" ? "正在执行任务…" : "配置视觉模型后即可运行"}
+            {status === "running"
+              ? "正在执行任务…"
+              : action === "import"
+                ? settings.auto_import
+                  ? "自动收件已开启"
+                  : "选择 ZIP 后手动导入"
+                : "配置视觉模型后即可运行"}
           </div>
           <footer className="commandBar">
             <button
@@ -737,6 +1102,31 @@ function statusIcon(status: RunStatus) {
     return <PauseCircle size={17} aria-hidden="true" />;
   }
   return <Activity size={17} aria-hidden="true" />;
+}
+
+function candidateKey(candidate: ZipCandidate) {
+  return `${candidate.path}:${candidate.size}:${candidate.modified_millis}`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function queueStatusLabel(status: QueueStatus) {
+  const labels: Record<QueueStatus, string> = {
+    running: "处理中",
+    queued: "等待模型",
+    success: "已发布",
+    failed: "失败",
+    cancelled: "已停止",
+  };
+  return labels[status];
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).pop() || path;
 }
 
 export default App;

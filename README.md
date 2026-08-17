@@ -125,6 +125,47 @@ python scripts/guide.py --action retry --provider lmstudio --month 2025-12
 python scripts/guide.py --action probe --image store/images/2025/2025-12/example.png
 ```
 
+## 增量收件与 Mac 同步
+
+Windows GUI 可以直接接收 Flomo ZIP，不再需要手动解压、改名和搬入 `raw/`。
+
+日期规则是：下次导出从“上次成功发布的最后一天”开始，**不要加一天**。例如最后一条已处理 memo 是 `2026-08-17 18:51:37`，下次仍从 `2026-08-17` 导出。当天已处理的内容会被去重，18:51 之后继续写下的内容不会丢失。
+
+在 GUI 中选择“增量收件”，或使用：
+
+```bash
+python scripts/guide.py --action import --zip "Downloads/flomo@User-20260817.zip" --publish-root "flomo-context" --provider lmstudio
+```
+
+成功后会生成：
+
+```text
+flomo-context/
+├── latest.json
+└── snapshots/<release-id>/
+    ├── manifest.json
+    └── llm_chunks/YYYY-MM/*.json
+```
+
+`latest.json` 只会在解压、去重、图片识别、chunks 生成和全部校验完成后更新。单张图片最终识别失败不会阻塞整批 memo，但失败数量和原因会写入发布清单并显示在 GUI。
+
+首次使用增量收件时，会自动重建一次历史月份，以迁移旧批次的重叠记录；完成后，后续导入只重建 ZIP 影响的月份。
+
+### 使用 Syncthing 在 Windows 和 Mac 之间传递
+
+Syncthing 不会随本工具安装。在 Windows 和 Mac 上分别安装、互相添加设备后，建议创建两个共享文件夹：
+
+| 文件夹 | Windows | Mac | 用途 |
+| --- | --- | --- | --- |
+| `flomo-inbox` | Send & Receive | Send & Receive | 从任意一台电脑放入 Flomo ZIP |
+| `flomo-context` | Send Only | Receive Only | Windows 发布完整 chunks，Mac 只接收 |
+
+在 GUI 设置中选择这两个本地目录，并开启自动收件。GUI 开启期间会监控 inbox，也可同时扫描 Windows Downloads。ZIP 尚未下载完成时不会启动；LM Studio 未开启时会保持等待。
+
+Mac 上的 Hermes/OpenClaw 应先读取 `latest.json`，再按它指向的 `manifest.json` 读取当前快照。清单包含文件哈希，用来避免 Agent 读到尚在同步的半成品。
+
+传输安全、中继和设备身份说明见 [Syncthing Security Principles](https://docs.syncthing.net/v1.0.0/users/security.html)。两端磁盘上仍是正常可读文件，建议保持系统登录与磁盘加密。
+
 ## 桌面 GUI
 
 仓库里包含一个开发版 Tauri 桌面 GUI，位置在：
@@ -133,7 +174,7 @@ python scripts/guide.py --action probe --image store/images/2025/2025-12/example
 gui/
 ```
 
-GUI 封装普通用户最常用的四个操作：
+GUI 封装普通用户最常用的五个操作：
 
 | 操作 | 对应命令 |
 | --- | --- |
@@ -141,8 +182,9 @@ GUI 封装普通用户最常用的四个操作：
 | 日常更新 | `python scripts/guide.py --action daily` |
 | 探测图片 | `python scripts/guide.py --action probe` |
 | 重试失败 | `python scripts/guide.py --action retry` |
+| 增量收件 | `python scripts/guide.py --action import` |
 
-GUI 会直接读写 `.env`，可在界面里设置 LM Studio 地址、视觉模型、重试模型、超时和 max tokens。文件夹路径会保存到 `.flomo-gui-settings.json`，下次打开会继续使用上次选择的位置。`.env` 和 `.flomo-gui-settings.json` 都会被 Git 忽略。
+GUI 会直接读写 `.env`，可在界面里设置 LM Studio 地址、视觉模型、重试模型、超时和 max tokens；也可设置 inbox、发布目录、Downloads 扫描和自动收件。文件夹路径会保存到 `.flomo-gui-settings.json`，下次打开会继续使用上次选择的位置。`.env` 和 `.flomo-gui-settings.json` 都会被 Git 忽略。
 
 开发版启动：
 

@@ -172,4 +172,6 @@ cd gui && npm run sidecar && npm run tauri:build:nsis # 打包 NSIS 安装器
 - **Provider 模式**: enrich 和 report 各自独立实现 `Protocol` + `build_provider()` 工厂，不共享 provider 基类。
 - **GUI 双运行时**: 生产模式用 PyInstaller sidecar 二进制；开发模式 fallback 到本地 Python。
 - **路径安全**: `store/images/` 下图片使用相对路径，跨平台兼容。
+- **WSL 环境运行（2026-08-10 实战踩坑）**: 本机是 WSL + Windows venv 混合环境，直接跑流水线会踩三个坑：① WSL 的 `python3` 无 bs4/Pillow，必须用 `.venv/Scripts/python.exe`（Windows Python 3.13）；② WSL 内 `export FLOMO_VLM_*` **不会传给** Windows 进程（provider 报 Missing env，全部图片误标 failed），必须用 `cmd.exe /c "set FLOMO_VLM_...&& python ..."` 批处理注入；③ WSL `nohup ... &` 后台启动的 Windows 进程会随 bash 命令退出被杀（中途断在 enrich），必须用 PowerShell `Start-Process -RedirectStandardOutput` 启动。稳定模式：PowerShell Start-Process + cmd 批处理注入 env + `--workers 2`（workers=4 会触发 LM Studio HTTP 500）。LM Studio 在 WSL 内 `curl 127.0.0.1:1234` 不通属正常，用 PowerShell `Invoke-WebRequest` 验证。长图 JSON 截断报 `Unterminated string` 时用 `--slice-long-images` 重试可解。
+- **重新 extract 后旧 enriched 孤儿记录**: extract 重建 `store/*.raw.jsonl` 后，若导出被替换（memo 数变化导致 image_id 漂移），`image.enriched.jsonl` 里旧月份记录会变孤儿；重跑该月 enrich 前先删掉 `month == YYYY-MM` 的旧记录（先备份），再 `--month` 重跑。
 - 如果改动只影响一个 stage，可以先跑对应测试文件；最终合并前仍建议跑完整测试。

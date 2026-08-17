@@ -40,6 +40,10 @@ __pycache__/
 
 /reports/*
 !/reports/.gitkeep
+
+# Syncthing inbox and published context contain private Flomo data.
+/flomo-inbox/
+/flomo-context/
 .opencode
 .omo
 /flomo-transcriber_*_x64-setup.exe

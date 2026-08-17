@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 MONTHLY_FILE_SUFFIX = ".enriched.jsonl"
 CHUNK_FILE_SUFFIX = ".json"
 CHUNK_FILE_PATTERN = re.compile(r"^(\d{4}-\d{2})-(\d{4})\.json$")
+MONTH_DIR_PATTERN = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
 ISO8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
 
@@ -308,7 +309,7 @@ class ChunkValidator:
         chunk_months = {
             path.name
             for path in self.chunks_root.iterdir()
-            if path.is_dir()
+            if path.is_dir() and MONTH_DIR_PATTERN.fullmatch(path.name)
         } if self.chunks_root.exists() else set()
         return sorted(monthly_months | chunk_months)
 

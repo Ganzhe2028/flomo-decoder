@@ -200,7 +200,7 @@ On Windows, Tauri requires Rust/Cargo, Microsoft C++ Build Tools, and WebView2. 
 
 ### Windows Installer
 
-The current GUI version is `0.2.0`; the old `0.1.0` build does not include Incremental Inbox. The installer is an NSIS `setup.exe`. Code signing, automatic updates, and Microsoft Store publishing are not included. Unsigned installers may trigger a Windows SmartScreen warning.
+The current GUI version is `0.3.0`; the old `0.1.0` build does not include Incremental Inbox, and `0.2.0` lacks Notion bi-directional link resolution. The installer is an NSIS `setup.exe`. Code signing, automatic updates, and Microsoft Store publishing are not included. Unsigned installers may trigger a Windows SmartScreen warning.
 
 Build prerequisites:
 

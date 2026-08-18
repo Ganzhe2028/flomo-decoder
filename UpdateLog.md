@@ -35,6 +35,7 @@
 - **新模块与校验**：`src/flomo_pipeline/links/`（notion_offline / notion_parser / resolver / models / validator），`scripts/validate_link_map.py` 校验映射完整性（L1–L6）；chunk validator 新增 `C11` 规则校验 `resolved_links` 结构。
 - **真实数据重建**：`store/link_map.json`（996 条、797 匹配、28 条关联自边）已导入，41 个月 984 个 chunk 全部重建（`chunk-v2`），137 个链接解析成功、859 个保留原文（目标 memo 不在 Notion 同步范围内）；全量校验 0 错误。
 - **测试**：`tests/test_links.py` 20 个测试 + `tests/test_cli.py` 端到端 CLI 测试，全量 105 passed。
+- **GUI 安装包升级**：桌面端版本更新为 `0.3.0`（含 Notion 双向链接解析与 ZIP 安全解压），sidecar 二进制已重建并全链路验证（chunk-v2 + resolved_links 字段），根目录安装包替换为 `flomo-transcriber_0.3.0_x64-setup.exe`，旧 0.1.0/0.2.0 安装包删除。
 
 ### 影响范围
 

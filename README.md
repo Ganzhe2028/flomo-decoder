@@ -204,7 +204,7 @@ Windows 上运行 Tauri 需要先安装 Rust/Cargo、Microsoft C++ Build Tools �
 
 ### Windows 安装包
 
-当前 GUI 版本为 `0.2.0`；旧版 `0.1.0` 不包含“增量收件”。安装包使用 NSIS `setup.exe`，暂不做代码签名、自动更新或 Microsoft Store 发布。未签名安装包可能触发 Windows SmartScreen 提示。
+当前 GUI 版本为 `0.3.0`；旧版 `0.1.0` 不包含“增量收件”，`0.2.0` 不含 Notion 双向链接解析。安装包使用 NSIS `setup.exe`，暂不做代码签名、自动更新或 Microsoft Store 发布。未签名安装包可能触发 Windows SmartScreen 提示。
 
 打包前置条件：
 

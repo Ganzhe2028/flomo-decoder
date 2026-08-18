@@ -8,6 +8,24 @@
 - `b`：重要功能、处理流程升级、版本更新换代。
 - `c`：小功能、日常修正、文档或脚本微调。
 
+## 2026-08-18 - 0.7.2 pi Agent 工程化（skill + 扩展护栏）
+
+### 本次更新内容
+
+- **项目级 skill**：新增 `.agents/skills/flomo-pipeline-ops/`（SKILL.md + references/troubleshooting.md），沉淀 WSL+Windows venv 混合环境的正确运行姿势（`.venv/Scripts/python.exe`、cmd.exe 注入 VLM env、PowerShell Start-Process 后台长任务、workers=2 上限等）与各 stage 排错手册（JSON 截断、孤儿 enriched 记录、图片 failed/skipped 处理）。
+- **项目级 pi 扩展（守门员）**：新增 `.pi/extensions/flomo-guardian.ts`，把 ANTI-PATTERNS 变成运行时护栏——对事实层（raw/、store/）与派生层（monthly/、llm_chunks/、reports/、flomo-context/）的 write/edit 与 `rm -rf` 需确认后才放行；src/scripts/gui/tests 源码改动后提醒更新 UpdateLog.md。
+- **项目级 pi 扩展（状态工具）**：新增 `.pi/extensions/flomo-status.ts`，注册 `flomo_status` 只读工具，一次调用汇报各 stage 数据计数（raw 导出数、store 各 JSONL 条数、图片增强状态分布、monthly/chunks/reports 数量、导入清单与快照发布状态），支持 `--month` 过滤。
+- **全局 pi 扩展**：新增 `~/.pi/agent/extensions/lmstudio-provider.ts`（不在仓库内），pi 启动时探测 LM Studio `/v1/models`，自动把本机已加载的模型注册为 `lmstudio/*` provider（可用 `PI_LMSTUDIO_BASE_URL` 覆盖地址）；LM Studio 未启动时静默跳过，不影响默认模型。
+
+### 验证结果
+
+- 用 pi 自带 jiti 冒烟测试加载全部三个扩展：`flomo_status` 在真实数据上输出正确（5451 memos / 3829 图片 / 2 failed / 41 月 / 984 chunks / 2 快照）；guardian 对 raw jsonl 写入、数据目录 rm -rf、源码改动提醒三条路径全部按预期拦截/提醒；mock LM Studio 响应下成功注册 2 个模型。
+- 纯工程化设施，不触碰流水线代码与数据文件，现有测试不受影响。
+
+### 影响范围
+
+- pi 交互体验层：新 skill 在接手流水线任务时触发；守门员与状态工具在项目信任后生效（需 /reload 或重启 pi）。流水线代码、数据格式、产出无任何变化。
+
 ## 2026-08-18 - 0.7.1 ZIP 解压安全修复（zip-slip）
 
 ### 本次更新内容

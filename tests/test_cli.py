@@ -1109,3 +1109,161 @@ def test_flomo_sidecar_mock_first_run_builds_chunks(tmp_path: Path) -> None:
     assert sidecar.returncode == 0, sidecar.stdout + sidecar.stderr
     assert "Ready for external LLM input" in sidecar.stdout
     assert (chunks_root / "2026-03" / "2026-03-0001.json").exists()
+
+
+def _build_sample_raw_with_links(raw_root: Path) -> Path:
+    batch_dir = raw_root / "2026" / "flomo@ExampleUser-20260304"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    (batch_dir / "ExampleUser的笔记.html").write_text(
+        """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<div class="name">@ExampleUser</div>
+<div class="date">于 2026-3-4 导出 2 条 MEMO</div>
+
+<div class="memo">
+  <div class="time">2026-03-01 10:00:00</div>
+  <div class="content"><p>想法 https://v.flomoapp.com/mine/?memo_id=MTIz 结束</p></div>
+</div>
+
+<div class="memo">
+  <div class="time">2026-03-02 14:30:00</div>
+  <div class="content"><p>目标内容在这里</p></div>
+</div>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    return raw_root
+
+
+def test_import_notion_links_and_build_chunks_scripts(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    raw_root = _build_sample_raw_with_links(tmp_path / "raw")
+    store_root = tmp_path / "store"
+    monthly_root = tmp_path / "monthly"
+    chunks_root = tmp_path / "llm_chunks"
+
+    for command in [
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "extract_raw.py"),
+            "--raw-root",
+            str(raw_root),
+            "--store-root",
+            str(store_root),
+        ],
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "enrich_images.py"),
+            "--store-root",
+            str(store_root),
+            "--provider",
+            "mock",
+        ],
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "merge_monthly.py"),
+            "--store-root",
+            str(store_root),
+            "--monthly-root",
+            str(monthly_root),
+        ],
+    ]:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    csv_path = tmp_path / "notion-export.csv"
+    csv_path.write_text(
+        "内容,创建时间,链接,关联自\n"
+        "目标内容在这里,2026-03-02 14:30:00,"
+        "https://v.flomoapp.com/mine/?memo_id=MTIz,"
+        "https://v.flomoapp.com/mine/?memo_id=NDU2\n"
+        "想法 https://v.flomoapp.com/mine/?memo_id=MTIz 结束,2026-03-01 10:00:00,"
+        "https://v.flomoapp.com/mine/?memo_id=NDU2,\n",
+        encoding="utf-8",
+    )
+
+    imported = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "import_notion_links.py"),
+            "--input",
+            str(csv_path),
+            "--store-root",
+            str(store_root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    assert "Matched to pipeline memos: 2/2" in imported.stdout
+    assert (store_root / "link_map.json").exists()
+
+    validate_map = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "validate_link_map.py"),
+            "--store-root",
+            str(store_root),
+            "--summary",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert validate_map.returncode == 0, validate_map.stdout + validate_map.stderr
+
+    build = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "build_chunks.py"),
+            "--monthly-root",
+            str(monthly_root),
+            "--chunks-root",
+            str(chunks_root),
+            "--month",
+            "2026-03",
+            "--link-map",
+            str(store_root / "link_map.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    assert "Links resolved: 1" in build.stdout
+
+    chunk_payload = json.loads(
+        (chunks_root / "2026-03" / "2026-03-0001.json").read_text(encoding="utf-8")
+    )
+    assert "〔关联 MEMO 2026-03-02「目标内容在这里」〕" in chunk_payload["text"]
+    assert "memo_id=MTIz" not in chunk_payload["text"]
+    assert chunk_payload["build_version"] == "chunk-v2"
+    assert [link["to_internal_id"] for link in chunk_payload["resolved_links"]] == ["123"]
+    # The 关联自 column of memo 123 lists 456, so the target memo's chunk
+    # carries an inbound [RELATED] block.
+    assert "[RELATED]" in chunk_payload["text"]
+    assert "linked_from:" in chunk_payload["text"]
+
+    validate_chunks = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "validate_chunks.py"),
+            "--monthly-root",
+            str(monthly_root),
+            "--chunks-root",
+            str(chunks_root),
+            "--month",
+            "2026-03",
+            "--summary",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert validate_chunks.returncode == 0, validate_chunks.stdout + validate_chunks.stderr

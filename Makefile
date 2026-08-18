@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: test extract validate enrich enrich-lmstudio probe-lmstudio validate-enrich merge-monthly validate-monthly build-chunks validate-chunks build-reports build-reports-lmstudio validate-reports pipeline pipeline-lmstudio probe-lmstudio-sh stage2-lmstudio-sh stage3-4-sh
+.PHONY: test extract validate enrich enrich-lmstudio probe-lmstudio validate-enrich merge-monthly validate-monthly build-chunks validate-chunks build-reports build-reports-lmstudio validate-reports import-notion-links validate-link-map pipeline pipeline-lmstudio probe-lmstudio-sh stage2-lmstudio-sh stage3-4-sh
 
 test:
 	$(PYTHON) -m pytest
@@ -43,6 +43,12 @@ build-reports-lmstudio:
 
 validate-reports:
 	$(PYTHON) scripts/validate_reports.py --chunks-root llm_chunks --reports-root reports
+
+import-notion-links:
+	$(PYTHON) scripts/import_notion_links.py --input $(INPUT) --store-root store
+
+validate-link-map:
+	$(PYTHON) scripts/validate_link_map.py --store-root store
 
 pipeline:
 	$(PYTHON) scripts/run_pipeline.py --report-provider mock

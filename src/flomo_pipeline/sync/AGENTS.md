@@ -6,14 +6,15 @@ Receives a Flomo ZIP, validates and archives it, records import state, then publ
 ## STRUCTURE
 ```
 sync/
-├── importer.py     # ZIP hashing, safe extraction, archive/import naming, import manifest
+├── importer.py     # ZIP hashing, archive/import naming, import manifest;
+│                   #   safe extraction lives in common/archive.py
 └── publisher.py    # Snapshot copy, file hashes, manifest.json, atomic latest.json
 ```
 
 ## WHERE TO LOOK
 | Task | File | Notes |
 |------|------|-------|
-| Change ZIP acceptance or safety limits | `importer.py` | Filename, traversal, symlink, size, integrity checks |
+| Change ZIP acceptance or safety limits | `common/archive.py:safe_extract_zip()` | Shared with links/Notion parsing; traversal, symlink, size, CRC checks |
 | Change import state | `importer.py:ImportManifestStore` | `raw/.import-manifest.json`, keyed by ZIP SHA-256 |
 | Change snapshot format | `publisher.py` | Full `llm_chunks/` copy and release manifest |
 | Change import workflow order | `../workflow.py:import_and_publish()` | Queue, build, validate, publish, final status |

@@ -48,6 +48,20 @@ class ChunkSourceItem:
 
 
 @dataclasses.dataclass(frozen=True)
+class ChunkResolvedLink:
+    """One flomo internal link inside a chunk source memo, resolved via link map."""
+
+    from_memo_id: str
+    to_internal_id: str
+    to_memo_id: str | None
+    to_created_at: str | None
+    to_snippet: str
+
+    def to_dict(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
 class ChunkRecord:
     chunk_id: str
     month: str
@@ -58,6 +72,7 @@ class ChunkRecord:
     token_estimate: int
     text: str
     source_items: list[ChunkSourceItem]
+    resolved_links: list[ChunkResolvedLink]
     build_version: str
     strategy: str
     status: str
@@ -73,6 +88,7 @@ class ChunkRecord:
             "token_estimate": self.token_estimate,
             "text": self.text,
             "source_items": [item.to_dict() for item in self.source_items],
+            "resolved_links": [link.to_dict() for link in self.resolved_links],
             "build_version": self.build_version,
             "strategy": self.strategy,
             "status": self.status,
@@ -85,11 +101,15 @@ class ChunkBuildStats:
     months_skipped: int = 0
     chunk_count: int = 0
     memo_count: int = 0
+    resolved_links: int = 0
+    unresolved_links: int = 0
 
     def format_summary(self) -> str:
         return (
             f"Months built: {self.months_built}\n"
             f"Months skipped: {self.months_skipped}\n"
             f"Chunks written: {self.chunk_count}\n"
-            f"Memos packed: {self.memo_count}"
+            f"Memos packed: {self.memo_count}\n"
+            f"Links resolved: {self.resolved_links}\n"
+            f"Links unresolved: {self.unresolved_links}"
         )

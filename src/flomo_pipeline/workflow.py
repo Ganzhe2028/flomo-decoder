@@ -16,6 +16,7 @@ from flomo_pipeline.enrich.providers import build_provider
 from flomo_pipeline.enrich.providers.lmstudio_openai import LMStudioEnrichmentProvider
 from flomo_pipeline.enrich.retry_config import resolve_lmstudio_retry_model_name
 from flomo_pipeline.extract import FlomoParser, StoreValidator, StoreWriter
+from flomo_pipeline.links import LINK_MAP_FILENAME, LinkMap
 from flomo_pipeline.merge import MonthlyMergeRunner, MonthlyValidator
 from flomo_pipeline.sync import ImportManifestStore, import_flomo_zip, publish_chunks_snapshot
 
@@ -64,6 +65,14 @@ def _normalize_month(month: str | None) -> str | None:
         except (ValueError, TypeError):
             pass
     return stripped
+
+
+def _load_link_map_if_present(store_root: Path) -> LinkMap | None:
+    """Auto-load store/link_map.json so rebuilt chunks keep link resolution."""
+    link_map_path = store_root / LINK_MAP_FILENAME
+    if not link_map_path.exists():
+        return None
+    return LinkMap.load(link_map_path)
 
 
 @dataclass(frozen=True)
@@ -297,6 +306,7 @@ def build_chunks_from_raw(
             chunks_root=chunks_root,
             month=target_month,
             overwrite=True,
+            link_map=_load_link_map_if_present(store_root),
         ).run()
         print(chunk_stats.format_summary())
 

@@ -218,7 +218,8 @@ The installer is written under `gui/src-tauri/target/release/bundle/nsis/`. It m
 
 ```text
 raw/          Your original Flomo export
-store/        Stage 1-2 outputs: raw JSONL, copied images, image enrichment
+store/        Stage 1-2 outputs: raw JSONL, copied images, image enrichment;
+              also holds link_map.json (Notion link resolution map)
 monthly/      Stage 3 output: monthly merged memo records
 llm_chunks/   Stage 4 output: chunk JSON files for external LLMs
 reports/      Stage 5 output: optional local monthly reports
@@ -432,6 +433,7 @@ Each chunk includes at least:
 - `token_estimate`
 - `text`
 - `source_items`
+- `resolved_links` (empty array when no link map is used)
 
 Notes:
 
@@ -441,6 +443,62 @@ Notes:
 - `failed` and `skipped` images are not fabricated into text, but they remain traceable in structured fields.
 
 The current strategy packs memos sequentially by time. The default target size is about `1200` estimated tokens. Token estimation is deterministic and heuristic; it is not meant to exactly match a specific model tokenizer.
+
+## Bi-directional Link Resolution (Notion Database)
+
+Internal links between memos inside a Flomo export are bare URLs like
+`https://v.flomoapp.com/mine/?memo_id=XXX`, where `XXX` is a base64-encoded
+internal id. The export itself contains **no id-to-content mapping**, so an
+LLM cannot see the relations you built manually in Flomo.
+
+The Notion flomo database fills that gap. The easiest path: hand the
+`import` script the shared database link and it reads the local Notion
+desktop offline mirror (`%APPDATA%/Notion/notion.db`) directly - no export,
+no token, no network:
+
+```bash
+# 1. Read the Notion offline mirror and build the map (use your own db link):
+python scripts/import_notion_links.py --notion-url "https://app.notion.com/p/<database-page-id>" --store-root store
+
+# 2. Validate the map:
+python scripts/validate_link_map.py --store-root store --summary
+
+# 3. Rebuild chunks so links become LLM-readable references:
+python scripts/build_chunks.py --monthly-root monthly --chunks-root llm_chunks \
+    --link-map store/link_map.json --overwrite
+```
+
+Parsing Notion export files (.zip / .csv / .md / directory) offline also works:
+
+```bash
+python scripts/import_notion_links.py --input export.zip --store-root store
+```
+
+Replacement effect (inside a chunk's `text`):
+
+- Before: `...usefulhttps://v.flomoapp.com/mine/?memo_id=NjM3NjIxNzg`
+- After: `...useful〔关联 MEMO 2023-04-15「心法就是用心看世界的方法」〕`
+- Backlinks: a linked memo's block gains a `[RELATED]` section listing its `linked_from` sources.
+- Structured field: chunks gain a `resolved_links` array with `from_memo_id`, `to_internal_id`, `to_memo_id`, `to_created_at`, `to_snippet`.
+
+Flomo-to-Notion sync quirks the parser handles:
+
+- Memo content is stored as the page title, **truncated to 50 chars** - fine
+  as a reference snippet; matching pipeline memos falls back from exact to
+  unique-prefix to prefix+date.
+- `关联自` URLs sometimes carry truncated base64 ids - recovered via unique
+  prefix match against the known id set.
+- If the Notion database only synced some memos, unresolved links stay verbatim and are counted.
+
+Rules:
+
+- Original `memo_text` in `source_items` stays untouched; only the rendered
+  `text` is rewritten - the Stage 1 fact layer is unaffected.
+- Links the map cannot resolve are **kept verbatim**, never silently dropped;
+  build stats report resolved / unresolved counts separately.
+- `store/link_map.json` is a local cache; re-run
+  `import_notion_links.py --overwrite` after the Notion data changes.
+- Without `--link-map` the behavior is exactly as before.
 
 ## Developer: Structure and Tests
 
@@ -499,6 +557,8 @@ make build-chunks
 make validate-chunks
 make build-reports
 make validate-reports
+make import-notion-links INPUT=<notion-export.zip>
+make validate-link-map
 make test
 ```
 
@@ -526,6 +586,7 @@ Do not default to refactoring existing stages. Current boundaries:
 - Stage 3: `store/*.jsonl -> monthly/YYYY-MM.enriched.jsonl`
 - Stage 4: `monthly/YYYY-MM.enriched.jsonl -> llm_chunks/YYYY-MM/*.json`
 - Stage 5: `llm_chunks/YYYY-MM/*.json -> reports/YYYY-MM.report.*`
+- Notion link resolution: `Notion database/export -> store/link_map.json -> Stage 4 link replacement`
 
 When adding features:
 
@@ -605,9 +666,17 @@ python scripts/check_open_source_readiness.py
 - `token_estimate`
 - `text`
 - `source_items`
+- `resolved_links`
 - `build_version`
 - `strategy`
 - `status`
+
+### `store/link_map.json`
+
+- `schema_version` (`link-map-v1`)
+- `entries`: keyed by flomo internal id; each entry has `internal_id`,
+  `memo_url`, `content`, `created_at`, `pipeline_memo_id` (nullable),
+  `backlink_ids`
 
 ### `reports/YYYY-MM.report.json`
 

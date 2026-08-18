@@ -8,6 +8,40 @@
 - `b`：重要功能、处理流程升级、版本更新换代。
 - `c`：小功能、日常修正、文档或脚本微调。
 
+## 2026-08-18 - 0.7.1 ZIP 解压安全修复（zip-slip）
+
+### 本次更新内容
+
+- **修复 zip-slip 漏洞**：`links/notion_parser.py` 对 Notion 导出 ZIP 直接 `extractall()`，无成员路径校验，恶意 ZIP 可借 `../` 路径逃逸临时目录。现将 sync 中规范的 `_safe_extract` 校验逻辑提升为 `src/flomo_pipeline/common/archive.py` 的 `safe_extract_zip()`（拒绝绝对路径 / `..` / 空路径 / 盘符冒号 / symlink，上限条目数 50k、总量 5GB、单成员 1GB，`testzip()` CRC 校验通过后才解压），sync 与 links 统一复用同一实现，消除安全逻辑双份维护。
+- **sync 迁移**：`sync/importer.py` 删除本地 `UnsafeArchiveError`、常量与 `_safe_extract`，改为从 common 导入；`sync/__init__.py` 的 `UnsafeArchiveError` re-export 改为直接来自 common，公共 API 与错误消息逐字不变。
+- **失败路径友好化**：`import_notion_links.py` 捕获 `UnsafeArchiveError` / `BadZipFile`，恶意或损坏 ZIP 输出友好错误并退出码 1，不再 traceback。
+- **测试**：`tests/test_links.py` 新增 4 个 zip-slip 测试（`../` 逃逸、绝对路径、盘符冒号、symlink），全量 109 passed。
+
+### 影响范围
+
+- Notion 导出 ZIP（.zip 输入）与 flomo ZIP 收件（import 工作流）共用新的安全解压入口；校验规则与错误消息与 sync 原实现逐字一致，行为无变化。
+- 真实数据回归：`import_notion_links.py --notion-url` 重跑结果与修复前一致（996 行 / 797 匹配 / 0 错误）。
+
+## 2026-08-18 - 0.7.0 Notion 双向链接解析
+
+### 本次更新内容
+
+- **Notion 离线镜像直读**：`import_notion_links.py` 新增 `--notion-url` 模式，从 app.notion.com 链接直接定位本机 Notion 桌面端的离线镜像（`%APPDATA%/Notion/notion.db`，SQLite 在线备份快照读取，无需导出、无需 token、无网络），按 URL 中的 page id 解析出对应 collection，读取 flomo 数据库行（own link / 内容 / 创建时间 / 关联自）。
+- **截断与冲突兼容**：flomo 同步把 memo 内容作为页面 title 截断到 50 字符，且「关联自」URL 的 base64 ID 常有截断；解析器用「精确解码 → 唯一前缀匹配（日期消歧）」恢复完整 ID，同步冲突副本（同内容不同内部 ID）在 claim pipeline memo_id 时 first-claim-wins。
+- **匹配升级**：`build_link_map` 从精确归一化匹配升级为「精确 → 唯一前缀 → 前缀+日期消歧」；真实数据匹配率 80.1%（996 行中 797 行匹配到 pipeline memo，其余为太短内容/已删除/未导出 memo）。
+- **Notion 导出文件解析**：`src/flomo_pipeline/links/notion_parser.py`，支持 .csv / .md / 目录 / .zip，自动嗅探列（链接/内容/时间/关联自/AI 洞察），CSV 与 MD 按内部 ID 合并。
+- **Stage 4 链接解析**：`build_chunks.py` 新增 `--link-map` 参数，chunk 渲染时把 memo 正文里的 `https://v.flomoapp.com/mine/?memo_id=XXX` 替换为 `〔关联 MEMO <日期>「内容摘要」〕`；被关联 memo 块追加 `[RELATED]` 小节列出入链来源。`source_items` 原始文本保持不变，未解析链接原样保留。
+- **结构化关联字段**：chunk JSON 新增 `resolved_links` 数组（`from_memo_id` / `to_internal_id` / `to_memo_id` / `to_created_at` / `to_snippet`），构建版本升级为 `chunk-v2`；构建统计新增 resolved / unresolved 链接计数。
+- **新模块与校验**：`src/flomo_pipeline/links/`（notion_offline / notion_parser / resolver / models / validator），`scripts/validate_link_map.py` 校验映射完整性（L1–L6）；chunk validator 新增 `C11` 规则校验 `resolved_links` 结构。
+- **真实数据重建**：`store/link_map.json`（996 条、797 匹配、28 条关联自边）已导入，41 个月 984 个 chunk 全部重建（`chunk-v2`），137 个链接解析成功、859 个保留原文（目标 memo 不在 Notion 同步范围内）；全量校验 0 错误。
+- **测试**：`tests/test_links.py` 20 个测试 + `tests/test_cli.py` 端到端 CLI 测试，全量 105 passed。
+
+### 影响范围
+
+- Stage 4 chunk 输出格式新增字段（旧 chunk 无 `resolved_links`，validator 容忍缺失；带 link map 重建后为 `chunk-v2`）。
+- 不带 `--link-map` 时 Stage 4 行为与之前完全一致。
+- 新增 `store/link_map.json` 本地缓存（gitignored）。
+
 ## 2026-08-17 - 0.6.0 增量收件与跨设备发布
 
 ### 本次更新内容

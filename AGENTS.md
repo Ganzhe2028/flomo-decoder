@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Flomo ZIP/HTML 导出 → LLM 可读 chunk → 完整快照发布的本地 Python 流水线。5 个处理 stage，加一条增量收件/发布工作流；纯本地文件，无数据库，无 Web 服务。栈：Python ≥3.11 + BeautifulSoup4 + Pillow + LM Studio VLM（可选）。
+Flomo ZIP/HTML 导出 → LLM 可读 chunk → 完整快照发布的本地 Python 流水线。5 个处理 stage，一条增量收件/发布工作流，加一条 Notion 双向链接解析（可选）。纯本地文件，无数据库，无 Web 服务。栈：Python ≥3.11 + BeautifulSoup4 + Pillow + LM Studio VLM（可选）。
 
 ## STRUCTURE
 
@@ -23,14 +23,15 @@ flomo-transcriber/
 │   ├── report/                  #   Stage 5: 可选 LLM 报告 (8 files, 653 lines)
 │   │   └── providers/           #     LM Studio / mock report provider 工厂
 │   ├── sync/                    #   ZIP 安全收件、导入 manifest、快照发布
+│   ├── links/                   #   Notion flomo 数据库 → 双向链接解析映射 (link_map.json)
 │   └── preview/                 #   死目录 — 无 .py 文件, 无 __init__.py
-├── scripts/                     # CLI 入口 (17 .py): guide.py ★ 主入口, stage 脚本, validator 脚本
+├── scripts/                     # CLI 入口 (19 .py): guide.py ★ 主入口, stage 脚本, validator 脚本
 ├── tests/                       # pytest (11 files, 84 tests) — no __init__.py
 ├── gui/                         # Tauri v2 桌面 GUI (React 18 + Rust, 独立构建)
 ├── raw/    store/    monthly/   # [gitignored] 流水线数据目录
 ├── llm_chunks/    reports/      # [gitignored] 最终输出
 ├── pyproject.toml               # hatchling build, ruff/mypy/pytest 配置
-└── Makefile                     # 18 个便捷 target
+└── Makefile                     # 21 个便捷 target
 ```
 
 ## WHERE TO LOOK
@@ -45,6 +46,7 @@ flomo-transcriber/
 | Stage 3: 月度合并 | `src/flomo_pipeline/merge/runner.py` | `MonthlyMergeRunner.run()` |
 | Stage 4: chunk 装箱 | `src/flomo_pipeline/chunk/runner.py` | ~1200 tokens/chunk, memo 不可拆分 |
 | Stage 5: LLM 报告 | `src/flomo_pipeline/report/runner.py` | 可选 stage, 不在默认 guide.py flow 中 |
+| Notion 双向链接解析 | `src/flomo_pipeline/links/` + `scripts/import_notion_links.py` | Notion 导出 → `store/link_map.json` → Stage 4 链接替换 |
 | JSONL 读写 | `src/flomo_pipeline/common/io.py` | `write_jsonl(atomic=True)`, `read_jsonl()` |
 | 校验框架 | `src/flomo_pipeline/common/validation.py` | `Severity`, `Violation`, `ValidationReport` |
 | 数据模型 | `src/flomo_pipeline/common/models.py` | `MemoRecord`, `ImageRecord` (frozen dataclass) |
@@ -71,6 +73,12 @@ flomo-transcriber/
 | `ReportProvider` | Protocol | `report/provider.py` | — | LLM report provider 接口 |
 | `ImportManifestStore` | class | `sync/importer.py` | import workflow | ZIP 哈希、状态和建议日期持久化 |
 | `publish_chunks_snapshot()` | function | `sync/publisher.py` | import workflow | 完整快照、文件哈希、原子 latest 指针 |
+| `LinkMap` | frozen dataclass | `links/models.py` | Stage 4, import script | flomo 内部 ID → memo 内容映射 |
+| `parse_notion_db()` | function | `links/notion_offline.py` | import script | 读 Notion 桌面端离线镜像 (notion.db) |
+| `parse_notion_input()` | function | `links/notion_parser.py` | import script | 解析 Notion 导出 CSV/MD/ZIP |
+| `resolve_text()` | function | `links/resolver.py` | Stage 4 chunk runner | memo 正文链接 → 可读引用 |
+| `safe_extract_zip()` | function | `common/archive.py` | sync + links | 带 zip-slip 防护的 ZIP 安全解压 |
+| `UnsafeArchiveError` | exception | `common/archive.py` | sync + links | 不安全 ZIP 拒绝异常 |
 | `ValidationReport` | frozen dataclass | `common/validation.py` | all validators | 校验结果容器 |
 | `write_jsonl()` | function | `common/io.py` | all runners | 原子 JSONL 写入 |
 
@@ -78,7 +86,7 @@ flomo-transcriber/
 
 1. `README.md` 或 `README.en.md`
 2. `pyproject.toml`
-3. 子模块 AGENTS.md（按需）：`src/flomo_pipeline/common/` `extract/` `enrich/` `merge/` `chunk/` `report/` `sync/` `gui/` `scripts/`
+3. 子模块 AGENTS.md（按需）：`src/flomo_pipeline/common/` `extract/` `enrich/` `merge/` `chunk/` `report/` `sync/` `links/` `gui/` `scripts/`
 4. 相关 stage 的 `src/flomo_pipeline/<stage>/`
 5. 对应测试文件
 
@@ -89,6 +97,7 @@ flomo-transcriber/
 - Stage 3 merge：`store/*.jsonl -> monthly/YYYY-MM.enriched.jsonl`
 - Stage 4 chunk：`monthly/YYYY-MM.enriched.jsonl -> llm_chunks/YYYY-MM/*.json`
 - Stage 5 report：`llm_chunks/YYYY-MM/*.json -> reports/YYYY-MM.report.*`
+- Notion 链接解析：`Notion 数据库/导出 -> store/link_map.json -> Stage 4 链接替换`
 - Import/publish：`Flomo ZIP -> raw/ + store/ + monthly/ + llm_chunks/ -> flomo-context/snapshots/`
 
 `common/` 只放跨 stage 共享的基础工具（文件读写、校验报告）。**不要把 stage 专属业务规则搬进 `common/`。**
@@ -113,7 +122,7 @@ flomo-transcriber/
 - 每个 stage 都有 validator，遵循 `ValidationReport` 接口
 
 **测试模式**：
-- 11 个测试文件, 84 个测试函数
+- 12 个测试文件, 109 个测试函数
 - 无外部 test fixture 文件 — 所有测试数据用 `tmp_path` 程序生成
 - Mock 只用 pytest 内置 `monkeypatch` + fake provider 类，不用 `unittest.mock`
 - 集成测试集中在 `tests/test_cli.py`（subprocess 方式）
@@ -162,6 +171,14 @@ python scripts/validate_enriched_images.py --store-root store --summary
 python scripts/validate_monthly.py --store-root store --monthly-root monthly --month 2025-12 --summary
 python scripts/validate_chunks.py --monthly-root monthly --chunks-root llm_chunks --month 2025-12 --summary
 python scripts/validate_reports.py --chunks-root llm_chunks --reports-root reports --summary
+python scripts/validate_link_map.py --store-root store --summary
+
+# Notion 双向链接（解析 flomo 内部 memo 链接，让 LLM 读到 memo 间关联）
+# 首选：直接读本机 Notion 桌面端离线镜像（无需导出/token/网络）
+python scripts/import_notion_links.py --notion-url "https://app.notion.com/p/<数据库页面ID>" --store-root store
+# 备选：解析 Notion 导出文件
+python scripts/import_notion_links.py --input <notion导出.zip|csv|md|notion.db> --store-root store
+python scripts/build_chunks.py --monthly-root monthly --chunks-root llm_chunks --month 2025-12 --link-map store/link_map.json --overwrite
 
 # GUI（需先安装 Rust/Cargo + Node.js）
 cd gui && npm install && npm run tauri dev           # 开发模式

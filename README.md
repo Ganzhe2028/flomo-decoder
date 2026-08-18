@@ -222,7 +222,7 @@ cmd /c npm run tauri:build:nsis
 
 ```text
 raw/          你放进去的 Flomo 原始导出
-store/        Stage 1-2 输出：raw JSONL、图片副本、图片增强结果
+store/        Stage 1-2 输出：raw JSONL、图片副本、图片增强结果；另存 link_map.json（Notion 链接映射）
 monthly/      Stage 3 输出：按月合并后的 memo 记录
 llm_chunks/   Stage 4 输出：给外部 LLM 读取的 chunk JSON
 reports/      Stage 5 输出：可选的本地月度报告
@@ -305,6 +305,14 @@ python scripts/merge_monthly.py --store-root store --monthly-root monthly --mont
 python scripts/validate_monthly.py --store-root store --monthly-root monthly --month 2025-12 --summary
 python scripts/build_chunks.py --monthly-root monthly --chunks-root llm_chunks --month 2025-12 --overwrite
 python scripts/validate_chunks.py --monthly-root monthly --chunks-root llm_chunks --month 2025-12 --summary
+```
+
+双向链接解析（详见「双向链接解析（Notion 数据库）」一节）：
+
+```bash
+python scripts/import_notion_links.py --notion-url "https://app.notion.com/p/<数据库页面ID>" --store-root store
+python scripts/validate_link_map.py --store-root store --summary
+python scripts/build_chunks.py --monthly-root monthly --chunks-root llm_chunks --link-map store/link_map.json --overwrite
 ```
 
 ### 平台脚本
@@ -436,6 +444,7 @@ chunk 是给 LLM 读取的最终上下文文件。
 - `token_estimate`
 - `text`
 - `source_items`
+- `resolved_links`（无 link map 时为空数组）
 
 其中：
 
@@ -445,6 +454,50 @@ chunk 是给 LLM 读取的最终上下文文件。
 - `failed` / `skipped` 图片不会伪造成文字，但会在结构化字段里保留。
 
 默认策略是按时间顺序装箱，目标大小约 `1200` tokens。估算方法是稳定启发式，不追求和某个模型 tokenizer 完全一致。
+
+## 双向链接解析（Notion 数据库）
+
+flomo 导出里 memo 之间的内部链接是形如 `https://v.flomoapp.com/mine/?memo_id=XXX` 的裸 URL，XXX 是 base64 编码的内部 ID，导出文件本身**不包含 ID 到内容的映射**，LLM 读不到你在 flomo 里手动建立的关联关系。
+
+用同步到 Notion 的 flomo 数据库可以补齐这份映射。**最省事的方式：直接把 Notion 数据库的分享链接交给导入脚本**，脚本直接读本机 Notion 桌面端的离线镜像（`%APPDATA%/Notion/notion.db`），无需导出、无需 token、无网络请求：
+
+```bash
+# 1. 直接读 Notion 离线镜像并构建映射（把链接换成你自己的 flomo 数据库链接）：
+python scripts/import_notion_links.py --notion-url "https://app.notion.com/p/<数据库页面ID>" --store-root store
+
+# 2. 校验映射：
+python scripts/validate_link_map.py --store-root store --summary
+
+# 3. 重建 chunks，把链接替换成 LLM 可读的引用：
+python scripts/build_chunks.py --monthly-root monthly --chunks-root llm_chunks \
+    --link-map store/link_map.json --overwrite
+```
+
+也可以离线解析 Notion 导出的文件（.zip / .csv / .md / 目录）：
+
+```bash
+python scripts/import_notion_links.py --input 导出.zip --store-root store
+```
+
+替换效果（chunk 的 `text` 字段内）：
+
+- 原文：`...这是有用的https://v.flomoapp.com/mine/?memo_id=NjM3NjIxNzg`
+- 替换后：`...这是有用的〔关联 MEMO 2023-04-15「心法就是用心看世界的方法」〕`
+- 反向链接：被关联的 memo 块会追加 `[RELATED]` 小节，列出 `linked_from` 来源 memo。
+- 结构化字段：chunk 新增 `resolved_links` 数组，每条含 `from_memo_id`、`to_internal_id`、`to_memo_id`、`to_created_at`、`to_snippet`。
+
+数据兼容性说明（flomo → Notion 同步的固有限制，解析器已适配）：
+
+- 同步把 memo 内容作为页面标题，**截断到 50 字符**：作为引用摘要足够，匹配 pipeline memo 时用「精确 → 唯一前缀 → 前缀+日期」逐级匹配。
+- 「关联自」URL 的 base64 ID 有时被截断：用已知 ID 集合做唯一前缀恢复。
+- Notion 数据库若只同步了部分 memo，解析不了的链接会原样保留并计数。
+
+规则：
+
+- `source_items` 里的原始 `memo_text` 保持不变，只有渲染后的 `text` 被替换 —— Stage 1 事实层不受影响。
+- 映射解析不了的链接**原样保留**，不静默丢弃；构建统计里会分别报告 resolved / unresolved 数量。
+- `store/link_map.json` 是本地缓存，Notion 数据更新后重跑 `import_notion_links.py --overwrite` 即可。
+- 不带 `--link-map` 时行为与之前完全一致。
 
 ## 开发者：项目结构和测试
 
@@ -503,6 +556,8 @@ make build-chunks
 make validate-chunks
 make build-reports
 make validate-reports
+make import-notion-links INPUT=<notion导出.zip>
+make validate-link-map
 make test
 ```
 
@@ -530,6 +585,7 @@ Agent 接手时先读这些位置：
 - Stage 3：`store/*.jsonl -> monthly/YYYY-MM.enriched.jsonl`
 - Stage 4：`monthly/YYYY-MM.enriched.jsonl -> llm_chunks/YYYY-MM/*.json`
 - Stage 5：`llm_chunks/YYYY-MM/*.json -> reports/YYYY-MM.report.*`
+- Notion 链接解析：`Notion 数据库/导出 -> store/link_map.json -> Stage 4 链接替换`
 
 新增能力时要遵守：
 
@@ -609,9 +665,15 @@ python scripts/check_open_source_readiness.py
 - `token_estimate`
 - `text`
 - `source_items`
+- `resolved_links`
 - `build_version`
 - `strategy`
 - `status`
+
+### `store/link_map.json`
+
+- `schema_version`（`link-map-v1`）
+- `entries`：以 flomo 内部 ID 为键，每条含 `internal_id`、`memo_url`、`content`、`created_at`、`pipeline_memo_id`（可空）、`backlink_ids`
 
 ### `reports/YYYY-MM.report.json`
 

@@ -33,6 +33,7 @@ class Rule(StrEnum):
     C8_MONTH_MEMO_COVERAGE = "C8"
     C9_CREATED_AT_RANGE_VALID = "C9"
     C10_PATH_RELATIVE = "C10"
+    C11_RESOLVED_LINKS_SHAPE = "C11"
     R1_MONTHLY_JSONL_PARSEABLE = "R1"
     R2_CHUNK_JSON_PARSEABLE = "R2"
     R3_REQUIRED_FIELD_MISSING = "R3"
@@ -69,6 +70,14 @@ REQUIRED_SOURCE_IMAGE_FIELDS = {
     "ocr_text",
     "visual_description",
     "error_message",
+}
+
+RESOLVED_LINK_FIELDS = {
+    "from_memo_id",
+    "to_internal_id",
+    "to_memo_id",
+    "to_created_at",
+    "to_snippet",
 }
 
 
@@ -272,6 +281,7 @@ class ChunkValidator:
 
                 self._validate_created_at_range(record, monthly_by_id, report, month)
                 self._validate_source_items(record, monthly_by_id, report, month)
+                self._validate_resolved_links(record, report, month)
 
             expected_memo_ids = [str(record.get("memo_id", "")) for record in monthly_records]
             if observed_memo_ids != expected_memo_ids:
@@ -530,3 +540,79 @@ class ChunkValidator:
                     record_id=record_id,
                 )
             )
+
+    def _validate_resolved_links(
+        self,
+        record: dict[str, Any],
+        report: ValidationReport,
+        month: str,
+    ) -> None:
+        resolved_links = record.get("resolved_links")
+        if resolved_links is None:
+            return
+        chunk_id = str(record.get("chunk_id", ""))
+        table = f"llm_chunks/{month}"
+        if not isinstance(resolved_links, list):
+            report.add(
+                Violation(
+                    rule=Rule.C11_RESOLVED_LINKS_SHAPE,
+                    severity=Severity.ERROR,
+                    message="resolved_links must be an array",
+                    table=table,
+                    record_id=chunk_id,
+                )
+            )
+            return
+
+        source_memo_ids = {
+            str(memo_id) for memo_id in record.get("source_memo_ids", [])
+        }
+        for link in resolved_links:
+            if not isinstance(link, dict):
+                report.add(
+                    Violation(
+                        rule=Rule.C11_RESOLVED_LINKS_SHAPE,
+                        severity=Severity.ERROR,
+                        message="resolved_links entries must be objects",
+                        table=table,
+                        record_id=chunk_id,
+                    )
+                )
+                continue
+            missing = RESOLVED_LINK_FIELDS - link.keys()
+            if missing:
+                report.add(
+                    Violation(
+                        rule=Rule.C11_RESOLVED_LINKS_SHAPE,
+                        severity=Severity.ERROR,
+                        message=(
+                            "resolved link missing required field(s): "
+                            + ", ".join(sorted(missing))
+                        ),
+                        table=table,
+                        record_id=chunk_id,
+                    )
+                )
+            if "from_memo_id" in link and str(link["from_memo_id"]) not in source_memo_ids:
+                report.add(
+                    Violation(
+                        rule=Rule.C11_RESOLVED_LINKS_SHAPE,
+                        severity=Severity.ERROR,
+                        message=(
+                            "resolved link from_memo_id is not a source memo "
+                            "of this chunk"
+                        ),
+                        table=table,
+                        record_id=chunk_id,
+                    )
+                )
+            if "to_internal_id" in link and not str(link["to_internal_id"]).isdigit():
+                report.add(
+                    Violation(
+                        rule=Rule.C11_RESOLVED_LINKS_SHAPE,
+                        severity=Severity.ERROR,
+                        message="resolved link to_internal_id must be a decimal string",
+                        table=table,
+                        record_id=chunk_id,
+                    )
+                )

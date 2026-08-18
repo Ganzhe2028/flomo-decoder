@@ -4,23 +4,16 @@ import hashlib
 import json
 import re
 import shutil
-import stat
 import tempfile
-import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
+
+from flomo_pipeline.common.archive import UnsafeArchiveError, safe_extract_zip
 
 MANIFEST_VERSION = 1
 FLOMO_ZIP_PATTERN = re.compile(r"^flomo@.+-(?P<date>\d{8})(?:-[0-9a-f]{8,64})?\.zip$", re.I)
-MAX_ARCHIVE_FILES = 50_000
-MAX_ARCHIVE_BYTES = 5 * 1024 * 1024 * 1024
-MAX_MEMBER_BYTES = 1024 * 1024 * 1024
-
-
-class UnsafeArchiveError(ValueError):
-    """Raised when a ZIP cannot be safely imported."""
 
 
 @dataclass(frozen=True)
@@ -135,7 +128,7 @@ def import_flomo_zip(zip_path: Path, raw_root: Path) -> ImportReceipt:
                 prefix=".flomo-import-", dir=raw_root
             ) as temp_name:
                 temp_root = Path(temp_name)
-                _safe_extract(archived_zip, temp_root)
+                safe_extract_zip(archived_zip, temp_root)
                 content_root = _find_export_root(temp_root, base_name)
                 import_dir.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(content_root, import_dir)
@@ -206,41 +199,6 @@ def _directory_matches(candidate: Path, zip_sha256: str) -> bool:
         and manifest_marker.is_file()
         and manifest_marker.read_text(encoding="ascii").strip() == zip_sha256
     )
-
-
-def _safe_extract(zip_path: Path, destination: Path) -> None:
-    try:
-        archive = zipfile.ZipFile(zip_path)
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise UnsafeArchiveError(f"Invalid ZIP archive: {exc}") from exc
-
-    with archive:
-        members = archive.infolist()
-        if len(members) > MAX_ARCHIVE_FILES:
-            raise UnsafeArchiveError(f"ZIP has too many entries: {len(members)}")
-        total_bytes = sum(member.file_size for member in members)
-        if total_bytes > MAX_ARCHIVE_BYTES:
-            raise UnsafeArchiveError(f"ZIP expands beyond {MAX_ARCHIVE_BYTES} bytes")
-
-        for member in members:
-            path = PurePosixPath(member.filename.replace("\\", "/"))
-            if (
-                path.is_absolute()
-                or ".." in path.parts
-                or not path.parts
-                or any(":" in part for part in path.parts)
-            ):
-                raise UnsafeArchiveError(f"Unsafe ZIP path: {member.filename}")
-            if member.file_size > MAX_MEMBER_BYTES:
-                raise UnsafeArchiveError(f"ZIP member is too large: {member.filename}")
-            unix_mode = member.external_attr >> 16
-            if stat.S_ISLNK(unix_mode):
-                raise UnsafeArchiveError(f"ZIP symlinks are not supported: {member.filename}")
-
-        bad_member = archive.testzip()
-        if bad_member is not None:
-            raise UnsafeArchiveError(f"ZIP integrity check failed: {bad_member}")
-        archive.extractall(destination)
 
 
 def _find_export_root(temp_root: Path, base_name: str) -> Path:

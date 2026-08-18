@@ -14,11 +14,13 @@ scripts/
 ├── merge_monthly.py                 # Stage 3: monthly merge
 ├── build_chunks.py                  # Stage 4: chunk builder
 ├── build_reports.py                 # Stage 5: LLM report generator
+├── import_notion_links.py           # Notion flomo 数据库 → store/link_map.json
 ├── validate_store.py                # Stage 1 validator
 ├── validate_enriched_images.py      # Stage 2 validator
 ├── validate_monthly.py              # Stage 3 validator
 ├── validate_chunks.py               # Stage 4 validator
 ├── validate_reports.py              # Stage 5 validator
+├── validate_link_map.py             # link_map.json validator
 ├── probe_lmstudio_vlm.py            # Single-image VLM connectivity test
 ├── retry_failed_images.py           # Retry Stage 2 failed images
 ├── build_gui_sidecar.py             # PyInstaller sidecar builder (Tauri packaging)
@@ -37,6 +39,7 @@ scripts/
 | Sidecar packaging | `build_gui_sidecar.py` + `flomo_sidecar.py` | PyInstaller `--onefile --noconsole` |
 | Debug a single stage | `extract_raw.py`, `enrich_images.py`, etc. | All accept `--store-root`, `--month`, etc. |
 | Validate output integrity | `validate_*.py` | Use `--summary` for counts, omit for full detail |
+| Notion link resolution | `import_notion_links.py` + `validate_link_map.py` | `--notion-url` reads the local Notion desktop mirror; `--input` accepts export files/notion.db |
 
 ## CONVENTIONS
 - Normal users: `python scripts/guide.py`. Stage scripts are for debugging/advanced use.

@@ -26,6 +26,7 @@ chunk/
 - Token estimation: `ceil(word_count × 1.3)`, stable across platforms
 - `failed` / `skipped` images kept in `source_items` (structured), NOT fabricated into `text`
 - Chunks are regenerable
+- Validation only treats `YYYY-MM` directories as month outputs; hidden/tool directories are ignored.
 
 ## ANTI-PATTERNS
 - **NEVER call any LLM/VLM** in Stage 4 — this is read-only assembly

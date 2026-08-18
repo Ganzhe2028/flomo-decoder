@@ -7,7 +7,7 @@ Parses Flomo HTML exports (`raw/YYYY/flomo@User-YYYYMMDD/*.html`) into three JSO
 ```
 extract/
 ├── parser.py        # FlomoParser: parse_all(), parse_batch(), _html_to_markdown()
-├── writer.py        # StoreWriter: write() → memo.raw.jsonl, image.raw.jsonl, missing_image.raw.jsonl
+├── writer.py        # StoreWriter: raw JSONL, copied images, enriched-result ID migration
 └── validator.py     # StoreValidator: 16 rules (R1-R5, C1-C11)
 ```
 
@@ -24,6 +24,9 @@ extract/
 - `source_relpath` uses POSIX paths (forward slashes) relative to `raw_root`
 - `image_relpath` follows pattern: `store/images/YYYY/YYYY-MM/{image_id}.ext`
 - Raw JSONL is the **immutable truth layer** — downstream must never rewrite it
+- Exact overlap dedupe applies only across export batches and includes user, timestamp, body, image count, and within-batch occurrence; same-batch duplicates remain.
+- The earliest memo/image ID stays canonical. `StoreWriter` backs up and remaps prior enrichment results, preferring successful results.
+- Same timestamp with different body is retained and counted as a possible revision; deletion propagation is intentionally out of scope.
 
 ## ANTI-PATTERNS
 - **NEVER rewrite `memo.raw.jsonl` / `image.raw.jsonl` after initial extraction**

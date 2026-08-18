@@ -33,7 +33,7 @@ scripts/
 ## WHERE TO LOOK
 | Task | File | Notes |
 |------|------|-------|
-| User-facing workflow | `guide.py` | Interactive menu + all 4 actions via `workflow.run_action()` |
+| User-facing workflow | `guide.py` | Interactive menu + 5 actions, including ZIP import, via `workflow.run_action()` |
 | Sidecar packaging | `build_gui_sidecar.py` + `flomo_sidecar.py` | PyInstaller `--onefile --noconsole` |
 | Debug a single stage | `extract_raw.py`, `enrich_images.py`, etc. | All accept `--store-root`, `--month`, etc. |
 | Validate output integrity | `validate_*.py` | Use `--summary` for counts, omit for full detail |
@@ -42,6 +42,7 @@ scripts/
 - Normal users: `python scripts/guide.py`. Stage scripts are for debugging/advanced use.
 - All scripts inject `src/` into `sys.path` to import `flomo_pipeline`.
 - Sidecar (`flomo_sidecar.py`) is identical to guide.py but pure argparse (no stdin prompts).
+- Import requires `--zip` and `--publish-root`; LM Studio unavailability returns exit code 75 for GUI queueing.
 - `.bat`/`.sh` scripts are legacy convenience wrappers — superseded by `guide.py`.
 
 ## ANTI-PATTERNS

@@ -1,19 +1,19 @@
 # AGENTS.md
 
-**Generated:** 2026-06-24 · **Commit:** `dcebf5c` · **Branch:** `main`
+**Updated:** 2026-08-18 · **Base commit:** `b2ff806` · **Branch:** `main`
 
 本文件给接手本仓库的 AI Agent 使用。改动前先确认当前任务的完成标准，改动后必须验证。
 
 ## OVERVIEW
 
-Flomo 导出 → LLM 可读 chunk 的本地 Python 流水线。5 个 stage，纯本地文件，无数据库，无 Web 服务。栈：Python ≥3.11 + BeautifulSoup4 + Pillow + LM Studio VLM（可选）。
+Flomo ZIP/HTML 导出 → LLM 可读 chunk → 完整快照发布的本地 Python 流水线。5 个处理 stage，加一条增量收件/发布工作流；纯本地文件，无数据库，无 Web 服务。栈：Python ≥3.11 + BeautifulSoup4 + Pillow + LM Studio VLM（可选）。
 
 ## STRUCTURE
 
 ```
 flomo-transcriber/
 ├── src/flomo_pipeline/          # ★ Python 主包 (import: flomo_pipeline)
-│   ├── workflow.py              #   核心编排器: run_action(), 4 种操作
+│   ├── workflow.py              #   核心编排器: run_action(), 5 种操作
 │   ├── common/                  #   共享: frozen dataclass, JSONL I/O, ValidationReport
 │   ├── extract/                 #   Stage 1: Flomo HTML → raw JSONL (4 files, 664 lines)
 │   ├── enrich/                  #   Stage 2: VLM 图片增强 (10 files, 1494 lines) ★ 最复杂
@@ -22,9 +22,10 @@ flomo-transcriber/
 │   ├── chunk/                   #   Stage 4: LLM chunk 组装, 不调模型 (5 files, 795 lines)
 │   ├── report/                  #   Stage 5: 可选 LLM 报告 (8 files, 653 lines)
 │   │   └── providers/           #     LM Studio / mock report provider 工厂
+│   ├── sync/                    #   ZIP 安全收件、导入 manifest、快照发布
 │   └── preview/                 #   死目录 — 无 .py 文件, 无 __init__.py
 ├── scripts/                     # CLI 入口 (17 .py): guide.py ★ 主入口, stage 脚本, validator 脚本
-├── tests/                       # pytest (10 files, 70 tests, 2620 lines) — no __init__.py
+├── tests/                       # pytest (11 files, 84 tests) — no __init__.py
 ├── gui/                         # Tauri v2 桌面 GUI (React 18 + Rust, 独立构建)
 ├── raw/    store/    monthly/   # [gitignored] 流水线数据目录
 ├── llm_chunks/    reports/      # [gitignored] 最终输出
@@ -36,7 +37,8 @@ flomo-transcriber/
 
 | Task | Location | Notes |
 |------|----------|-------|
-| 用户入口 / 工作流 | `scripts/guide.py` → `src/flomo_pipeline/workflow.py` | 4 种操作: first / daily / probe / retry |
+| 用户入口 / 工作流 | `scripts/guide.py` → `src/flomo_pipeline/workflow.py` | 5 种操作: first / daily / probe / retry / import |
+| 增量收件 / 发布 | `src/flomo_pipeline/sync/` | ZIP 安全检查、导入状态、快照清单与 `latest.json` |
 | Stage 1: HTML 解析 | `src/flomo_pipeline/extract/parser.py` | `FlomoParser.parse_all()`, `_html_to_markdown()` |
 | Stage 2: VLM 调用 | `src/flomo_pipeline/enrich/providers/lmstudio_openai.py` | 整图 → 切片 fallback, retry 逻辑 |
 | Stage 2: 图片切片 | `src/flomo_pipeline/enrich/image_slicer.py` | `create_image_slices()`, 长截图降级 |
@@ -47,8 +49,8 @@ flomo-transcriber/
 | 校验框架 | `src/flomo_pipeline/common/validation.py` | `Severity`, `Violation`, `ValidationReport` |
 | 数据模型 | `src/flomo_pipeline/common/models.py` | `MemoRecord`, `ImageRecord` (frozen dataclass) |
 | 测试入口 | `tests/conftest.py` | `sample_raw_root` fixture, `run_fake_lmstudio_server` |
-| GUI 后端 | `gui/src-tauri/src/lib.rs` | 5 个 Tauri command |
-| GUI 前端 | `gui/src/App.tsx` | React SPA, 4 操作 + settings |
+| GUI 后端 | `gui/src-tauri/src/lib.rs` | 8 个 Tauri command |
+| GUI 前端 | `gui/src/App.tsx` | React SPA, 5 操作 + inbox queue + settings |
 | 桌面打包 | `scripts/build_gui_sidecar.py` → `gui/` npm scripts | PyInstaller → NSIS |
 | 开源安全检查 | `scripts/check_open_source_readiness.py` | 数据泄露 / API key / 个人路径 |
 | Makefile 快捷入口 | `Makefile` | `make test`, `make enrich-lmstudio`, etc. |
@@ -58,15 +60,17 @@ flomo-transcriber/
 | Symbol | Type | Location | Refs | Role |
 |--------|------|----------|------|------|
 | `run_action()` | function | `workflow.py:run_action` | 2 (guide.py, flomo_sidecar.py) | 核心编排入口 |
-| `WorkflowPaths` | frozen dataclass | `workflow.py:30` | — | 路径配置 |
+| `WorkflowPaths` | frozen dataclass | `workflow.py:WorkflowPaths` | — | 路径配置 |
 | `FlomoParser` | class | `extract/parser.py` | — | HTML → 结构化记录 |
 | `ImageEnrichmentRunner` | class | `enrich/runner.py` | 2 (scripts) | Stage 2 批处理引擎 |
 | `LMStudioEnrichmentProvider` | class | `enrich/providers/lmstudio_openai.py` | 1 (build_provider) | LM Studio VLM 适配器 |
-| `EnrichmentProvider` | Protocol | `enrich/provider.py:14` | 13 callers | VLM provider 接口 |
+| `EnrichmentProvider` | Protocol | `enrich/provider.py:EnrichmentProvider` | provider implementations | VLM provider 接口 |
 | `MonthlyMergeRunner` | class | `merge/runner.py` | 1 (script) | Stage 3 合并引擎 |
 | `ChunkBuildRunner` | class | `chunk/runner.py` | 1 (script) | Stage 4 chunk 构建器 |
 | `ReportBuildRunner` | class | `report/runner.py` | 1 (script) | Stage 5 报告生成器 |
 | `ReportProvider` | Protocol | `report/provider.py` | — | LLM report provider 接口 |
+| `ImportManifestStore` | class | `sync/importer.py` | import workflow | ZIP 哈希、状态和建议日期持久化 |
+| `publish_chunks_snapshot()` | function | `sync/publisher.py` | import workflow | 完整快照、文件哈希、原子 latest 指针 |
 | `ValidationReport` | frozen dataclass | `common/validation.py` | all validators | 校验结果容器 |
 | `write_jsonl()` | function | `common/io.py` | all runners | 原子 JSONL 写入 |
 
@@ -74,7 +78,7 @@ flomo-transcriber/
 
 1. `README.md` 或 `README.en.md`
 2. `pyproject.toml`
-3. 子模块 AGENTS.md（按需）：`src/flomo_pipeline/common/` `extract/` `enrich/` `merge/` `chunk/` `report/` `gui/` `scripts/`
+3. 子模块 AGENTS.md（按需）：`src/flomo_pipeline/common/` `extract/` `enrich/` `merge/` `chunk/` `report/` `sync/` `gui/` `scripts/`
 4. 相关 stage 的 `src/flomo_pipeline/<stage>/`
 5. 对应测试文件
 
@@ -85,6 +89,7 @@ flomo-transcriber/
 - Stage 3 merge：`store/*.jsonl -> monthly/YYYY-MM.enriched.jsonl`
 - Stage 4 chunk：`monthly/YYYY-MM.enriched.jsonl -> llm_chunks/YYYY-MM/*.json`
 - Stage 5 report：`llm_chunks/YYYY-MM/*.json -> reports/YYYY-MM.report.*`
+- Import/publish：`Flomo ZIP -> raw/ + store/ + monthly/ + llm_chunks/ -> flomo-context/snapshots/`
 
 `common/` 只放跨 stage 共享的基础工具（文件读写、校验报告）。**不要把 stage 专属业务规则搬进 `common/`。**
 
@@ -108,7 +113,7 @@ flomo-transcriber/
 - 每个 stage 都有 validator，遵循 `ValidationReport` 接口
 
 **测试模式**：
-- 10 个测试文件, 70 个测试函数
+- 11 个测试文件, 84 个测试函数
 - 无外部 test fixture 文件 — 所有测试数据用 `tmp_path` 程序生成
 - Mock 只用 pytest 内置 `monkeypatch` + fake provider 类，不用 `unittest.mock`
 - 集成测试集中在 `tests/test_cli.py`（subprocess 方式）
@@ -143,6 +148,7 @@ python scripts/check_open_source_readiness.py       # 开源安全检查（数�
 # 用户入口
 python scripts/guide.py                             # 交互式菜单
 python scripts/guide.py --action first --provider lmstudio --month 2025-12
+python scripts/guide.py --action import --provider lmstudio --zip <flomo.zip> --publish-root flomo-context
 
 # 单 stage 排错（均支持 --month / --overwrite / --summary）
 python scripts/extract_raw.py --raw-root raw --store-root store

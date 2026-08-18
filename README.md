@@ -113,6 +113,7 @@ python scripts/guide.py
 | `2. Daily update` | 更新了 `raw/`，想重新生成 chunks | 跳过已成功图片，补齐新内容 |
 | `3. Probe one image` | 不确定 LM Studio 是否能读图 | 单独测试一张图片 |
 | `4. Retry failed image records` | 有图片识别失败 | 只重试失败图片 |
+| `5. Import Flomo ZIP` | 想直接处理新的 Flomo ZIP | 安全解压、去重、识图并发布完整快照 |
 
 如果只想处理某个月，按提示输入 `2025-12` 这样的月份；直接回车会处理全部月份。
 
@@ -123,6 +124,7 @@ python scripts/guide.py --action first --provider lmstudio --month 2025-12
 python scripts/guide.py --action daily --provider lmstudio --month 2025-12
 python scripts/guide.py --action retry --provider lmstudio --month 2025-12
 python scripts/guide.py --action probe --image store/images/2025/2025-12/example.png
+python scripts/guide.py --action import --zip "Downloads/flomo@User-20260817.zip" --publish-root "flomo-context" --provider lmstudio
 ```
 
 ## 增量收件与 Mac 同步
@@ -151,6 +153,8 @@ flomo-context/
 
 首次使用增量收件时，会自动重建一次历史月份，以迁移旧批次的重叠记录；完成后，后续导入只重建 ZIP 影响的月份。
 
+程序按 ZIP 内容识别重复导入。同一个 ZIP 已成功发布时会直接复用已有文字和图片识别结果，因此不会再次出现 Gemma 处理进度。`.mov`、`.mp4`、`.m4a` 等视频或音频附件仍会明确标记为 skipped。
+
 ### 使用 Syncthing 在 Windows 和 Mac 之间传递
 
 Syncthing 不会随本工具安装。在 Windows 和 Mac 上分别安装、互相添加设备后，建议创建两个共享文件夹：
@@ -161,6 +165,8 @@ Syncthing 不会随本工具安装。在 Windows 和 Mac 上分别安装、互�
 | `flomo-context` | Send Only | Receive Only | Windows 发布完整 chunks，Mac 只接收 |
 
 在 GUI 设置中选择这两个本地目录，并开启自动收件。GUI 开启期间会监控 inbox，也可同时扫描 Windows Downloads。ZIP 尚未下载完成时不会启动；LM Studio 未开启时会保持等待。
+
+启用 Downloads 扫描后，GUI 会处理该目录内所有符合 Flomo 命名且尚未导入的 ZIP。只想处理 Syncthing inbox 时，应关闭 Downloads 扫描，或把旧 ZIP 移出 Downloads。
 
 Mac 上的 Hermes/OpenClaw 应先读取 `latest.json`，再按它指向的 `manifest.json` 读取当前快照。清单包含文件哈希，用来避免 Agent 读到尚在同步的半成品。
 
@@ -198,7 +204,7 @@ Windows 上运行 Tauri 需要先安装 Rust/Cargo、Microsoft C++ Build Tools �
 
 ### Windows 安装包
 
-第一版安装包目标是 NSIS `setup.exe`，暂不做代码签名、自动更新或 Microsoft Store 发布。未签名安装包可能触发 Windows SmartScreen 提示。
+当前 GUI 版本为 `0.2.0`；旧版 `0.1.0` 不包含“增量收件”。安装包使用 NSIS `setup.exe`，暂不做代码签名、自动更新或 Microsoft Store 发布。未签名安装包可能触发 Windows SmartScreen 提示。
 
 打包前置条件：
 
@@ -220,6 +226,8 @@ store/        Stage 1-2 输出：raw JSONL、图片副本、图片增强结果
 monthly/      Stage 3 输出：按月合并后的 memo 记录
 llm_chunks/   Stage 4 输出：给外部 LLM 读取的 chunk JSON
 reports/      Stage 5 输出：可选的本地月度报告
+flomo-inbox/  Syncthing 可共享的 ZIP 收件目录
+flomo-context/  完整发布快照；Mac Agent 从 latest.json 进入
 gui/          开发版 Tauri 桌面 GUI
 scripts/      命令行入口
 src/          Python 源码
@@ -449,6 +457,7 @@ src/flomo_pipeline/
 ├── enrich/
 ├── merge/
 ├── chunk/
+├── sync/                 # ZIP 安全收件、导入状态与完整快照发布
 └── report/
 ```
 
@@ -634,6 +643,8 @@ python scripts/check_open_source_readiness.py
 - `monthly/`
 - `llm_chunks/`
 - `reports/`
+- `flomo-inbox/`
+- `flomo-context/`
 - 本地遗留的 `preview/`，如果存在
 
 当前 private 工作仓库的旧 Git history 不适合直接公开。公开发布应使用 clean orphan branch 或全新的 public repo。

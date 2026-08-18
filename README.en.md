@@ -113,6 +113,7 @@ Common choices:
 | `2. Daily update` | You changed `raw/` and want fresh chunks | Skips successful images and fills new content |
 | `3. Probe one image` | You are checking whether LM Studio can read images | Tests one image |
 | `4. Retry failed image records` | Some image records failed | Retries failed records only |
+| `5. Import Flomo ZIP` | You want to process a new Flomo ZIP directly | Safely extracts, deduplicates, enriches, and publishes a complete snapshot |
 
 To process one month, enter a month like `2025-12`; press Enter to process all months.
 
@@ -123,6 +124,7 @@ python scripts/guide.py --action first --provider lmstudio --month 2025-12
 python scripts/guide.py --action daily --provider lmstudio --month 2025-12
 python scripts/guide.py --action retry --provider lmstudio --month 2025-12
 python scripts/guide.py --action probe --image store/images/2025/2025-12/example.png
+python scripts/guide.py --action import --zip "Downloads/flomo@User-20260817.zip" --publish-root "flomo-context" --provider lmstudio
 ```
 
 ## Incremental Inbox and Mac Delivery
@@ -151,6 +153,8 @@ flomo-context/
 
 The first incremental import rebuilds historical months once to migrate overlaps from older batches. Later imports rebuild only the months affected by that ZIP.
 
+ZIP content identifies duplicate imports. When the same ZIP has already been published, the workflow reuses its memo and image-enrichment results, so no new Gemma progress appears. Video and audio attachments such as `.mov`, `.mp4`, and `.m4a` remain explicitly marked as skipped.
+
 For automatic Windows-to-Mac delivery, install Syncthing on both devices and create two shared folders:
 
 | Folder | Windows | Mac | Purpose |
@@ -159,6 +163,8 @@ For automatic Windows-to-Mac delivery, install Syncthing on both devices and cre
 | `flomo-context` | Send Only | Receive Only | Publish complete snapshots from Windows to Mac |
 
 Select those local folders in GUI settings and enable automatic inbox processing. While the GUI is open, it watches the inbox and can also scan Windows Downloads. Incomplete ZIPs are ignored; imports wait when LM Studio is unavailable.
+
+When Downloads scanning is enabled, the GUI processes every correctly named Flomo ZIP there that is not yet in the import history. Disable Downloads scanning, or move old ZIPs elsewhere, if only the Syncthing inbox should be processed.
 
 Hermes/OpenClaw should read `latest.json`, follow its snapshot manifest, and only use files after their hashes match. See [Syncthing Security Principles](https://docs.syncthing.net/v1.0.0/users/security.html) for transport and device-security details.
 
@@ -194,7 +200,7 @@ On Windows, Tauri requires Rust/Cargo, Microsoft C++ Build Tools, and WebView2. 
 
 ### Windows Installer
 
-The first installer target is an NSIS `setup.exe`. Code signing, automatic updates, and Microsoft Store publishing are not included in this phase. Unsigned installers may trigger a Windows SmartScreen warning.
+The current GUI version is `0.2.0`; the old `0.1.0` build does not include Incremental Inbox. The installer is an NSIS `setup.exe`. Code signing, automatic updates, and Microsoft Store publishing are not included. Unsigned installers may trigger a Windows SmartScreen warning.
 
 Build prerequisites:
 
@@ -216,6 +222,8 @@ store/        Stage 1-2 outputs: raw JSONL, copied images, image enrichment
 monthly/      Stage 3 output: monthly merged memo records
 llm_chunks/   Stage 4 output: chunk JSON files for external LLMs
 reports/      Stage 5 output: optional local monthly reports
+flomo-inbox/  Syncthing-shareable ZIP inbox
+flomo-context/  Complete published snapshots; Mac agents enter through latest.json
 gui/          Development Tauri desktop GUI
 scripts/      CLI entry points
 src/          Python source code
@@ -445,6 +453,7 @@ src/flomo_pipeline/
 ├── enrich/
 ├── merge/
 ├── chunk/
+├── sync/                 # Safe ZIP inbox, import state, and complete snapshot publishing
 └── report/
 ```
 
@@ -630,6 +639,8 @@ The check confirms that real data from these directories is not tracked by Git:
 - `monthly/`
 - `llm_chunks/`
 - `reports/`
+- `flomo-inbox/`
+- `flomo-context/`
 - local legacy `preview/`, if present
 
 The old Git history of the private working repository is not suitable for direct public release. Publish from a clean orphan branch or a new public repository.

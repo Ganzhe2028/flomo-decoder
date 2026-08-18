@@ -14,6 +14,8 @@ BLOCKED_TRACKED_PREFIXES = (
     "llm_chunks/",
     "reports/",
     "preview/",
+    "flomo-inbox/",
+    "flomo-context/",
 )
 ALLOWED_TRACKED_PRIVATE_PLACEHOLDERS = {
     "raw/.gitkeep",

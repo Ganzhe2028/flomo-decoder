@@ -17,10 +17,10 @@
 - **历史图片结果复用**：重叠批次保留最早 memo/image ID，`image.enriched.jsonl` 迁移前自动备份，多个结果时优先保留 success。
 - **一次性兼容迁移**：首次增量导入自动重建历史月份，使既有重叠批次与新去重规则一致；迁移完成后恢复为仅重建受影响月份。
 - **完整快照发布**：chunks 发布到 `snapshots/<release-id>/`，`manifest.json` 保存文件哈希、时间范围、去重，以及失败图片数与原因；只有全部校验通过后才更新 `latest.json`。
-- **GUI 自动队列**：新增 inbox/发布目录、Downloads 扫描、ZIP 完整性检查、自动处理、LM Studio 等待、建议导出日期和发布状态。
+- **GUI 自动队列**：新增 inbox/发布目录、Downloads 扫描、ZIP 完整性检查、自动处理、LM Studio 等待、建议导出日期和发布状态；相同 ZIP 会复用既有识图结果，Downloads 扫描会处理目录内所有尚未导入的 Flomo ZIP。
 - **GUI 安装包升级**：桌面端版本更新为 `0.2.0`，避免与不含增量收件的旧版 `0.1.0` 混淆。
 - **校验修正**：允许无正文但有图片的 memo；chunks 校验忽略 `.opencode` 等非 `YYYY-MM` 目录。
-- **Syncthing 用法**：README 增加 Windows/Mac inbox 和 context 双目录配置、Agent 完整性校验与安全说明。
+- **Syncthing 用法**：README 增加 Windows/Mac inbox 和 context 双目录配置、Agent 完整性校验与安全说明；两个目录同时纳入开源数据泄露检查。
 
 ### 影响范围
 

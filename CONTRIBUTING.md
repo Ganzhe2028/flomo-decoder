@@ -32,5 +32,6 @@ Keep changes scoped to one pipeline layer when possible:
 - Stage 3: monthly merge
 - Stage 4: chunk building
 - Stage 5: report building
+- Import and delivery: ZIP safety, overlap deduplication, import state, and snapshot publishing
 
 Update README or other docs when user-visible behavior changes.

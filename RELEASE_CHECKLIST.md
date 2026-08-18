@@ -6,7 +6,8 @@ Use this checklist before publishing a public release.
 
 - [ ] `git status --short --ignored` shows no tracked private data.
 - [ ] `git ls-files` contains only code, tests, docs, config, and `.gitkeep`.
-- [ ] `raw/`, `store/`, `monthly/`, `llm_chunks/`, `reports/`, and local
+- [ ] `raw/`, `store/`, `monthly/`, `llm_chunks/`, `reports/`, `flomo-inbox/`,
+      `flomo-context/`, and local
       `preview/` if present contain no tracked real data.
 - [ ] `.env` and `.env.*` files are ignored.
 - [ ] `.env.example` contains placeholders only.
@@ -15,6 +16,8 @@ Use this checklist before publishing a public release.
 
 - [ ] `python -m pytest`
 - [ ] `python scripts/check_open_source_readiness.py`
+- [ ] GUI version agrees across `package.json`, `package-lock.json`, `Cargo.toml`, and `tauri.conf.json`.
+- [ ] The PyInstaller sidecar and NSIS installer were rebuilt after Python or GUI changes.
 
 ## History
 

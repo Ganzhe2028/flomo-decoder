@@ -24,7 +24,11 @@ The following directories are intentionally ignored except for tracked placehold
 - `monthly/`
 - `llm_chunks/`
 - `reports/`
+- `flomo-inbox/`
+- `flomo-context/`
 - local `preview/` if present
+
+Published snapshots contain personal memo text and image-derived descriptions. Syncthing encrypts transport, but files remain readable on both devices; protect both endpoints with account access controls and disk encryption.
 
 Before publishing or sharing a fork, run:
 

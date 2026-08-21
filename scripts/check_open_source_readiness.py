@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -34,15 +35,23 @@ SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{20,}|password\s*=|secret\s*=)",
     re.IGNORECASE,
 )
-PRIVATE_TEXT_RE = re.compile(
-    r"(/Users/[^\\s)]+|"
-    r"C:\\\\Users\\\\[^\\s)]+|"
-    r"flomo@Isaac|"
-    r"IsaacBao|"
-    r"IsaacsAir|"
-    r"baolecheng)",
-    re.IGNORECASE,
-)
+def _build_private_text_re() -> re.Pattern[str]:
+    """通用个人路径模式，可选叠加 FLOMO_PRIVATE_TEXT_PATTERNS 环境变量。
+
+    不在仓库里硬编码任何个人用户名/设备名；本机需要时可经环境变量追加
+    正则片段，例如 FLOMO_PRIVATE_TEXT_PATTERNS='flomo@Myname|MyDevice'。
+    """
+    extra = os.environ.get("FLOMO_PRIVATE_TEXT_PATTERNS", "").strip()
+    parts = [
+        r"/Users/[^\\s)]+",
+        r"C:\\\\Users\\\\[^\\s)]+",
+    ]
+    if extra:
+        parts.append(extra)
+    return re.compile(r"(" + "|".join(parts) + r")", re.IGNORECASE)
+
+
+PRIVATE_TEXT_RE = _build_private_text_re()
 
 
 def _run(command: list[str]) -> str:
